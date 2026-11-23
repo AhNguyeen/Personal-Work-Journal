@@ -34,14 +34,18 @@
   - `src/database/repositories/recurrenceOccurrenceRepository.js`
   - `src/database/repositories/projectJournalRepository.js`
 
-### 3. Chuẩn hóa Nguồn gốc Thời gian Thực tế (Actual Duration Provenance)
+### 3. Chuẩn hóa Nguồn gốc Thời gian Thực tế: Phân biệt rõ Timer vs Nhập tay
 - **Thứ tự ưu tiên đối soát (Strict Priority Order):**
-  1. `timer_verified`: Có phiên bấm giờ thực tế trong `timerSessions`. Nếu vừa có Timer vừa có nhập tay, ưu tiên Timer Session, không cộng dồn.
-  2. `manual_verified`: **Chỉ khi có bằng chứng người dùng chủ động nhập hoặc xác nhận thủ công** (có cờ `manuallyConfirmed === true`, `manualEntry === true`, `source === 'manual'`, hoặc phiên `type === 'manual'`). Tuyệt đối không nhận diện chỉ qua điều kiện `actualDurationMinutes !== durationMinutes`.
+  1. `timer_verified`: Có phiên bấm giờ thực tế trong `timerSessions` với **`type !== 'manual'`** (đo bằng Stopwatch/Pomodoro thực tế).
+  2. `manual_verified`:
+     - Có phiên hoàn tất trong `timerSessions` thuộc loại **`type === 'manual'`** (người dùng tự log tay). **Quy tắc bắt buộc: Phiên `manual` trong `timerSessions` tuyệt đối không được phân loại nhầm thành `timer_verified`.**
+     - Hoặc có cờ xác nhận chủ động: `manuallyConfirmed === true`, `manualEntry === true`, `source === 'manual'`.
+     - Tuyệt đối không nhận diện chỉ qua điều kiện `actualDurationMinutes !== durationMinutes`.
   3. `legacy_unverified`: Dữ liệu V1 cũ kế thừa không có bằng chứng nguồn.
      - **Bảo toàn dữ liệu lịch sử:** Đối với các Activity V1 có trạng thái `Planned` hoặc `Completed` mà có số phút cũ `actualDurationMinutes > 0`, **TUYỆT ĐỐI KHÔNG ĐƯỢC TỰ Ý XÓA HOẶC RESET VỀ 0**. Bắt buộc giữ nguyên số phút cũ và gán `actualDurationSeconds = actualDurationMinutes * 60`.
      - **Tách bạch tính toán:** Dữ liệu `legacy_unverified` tuyệt đối KHÔNG được tính chung vào tổng thời gian thực tế đã xác minh (**Verified Actual Time**). Phân tách rõ ràng thành hai chỉ số riêng biệt trong hệ thống báo cáo.
   4. `unperformed`: Hoạt động `Planned` và `actualDurationMinutes === 0` (chưa thực hiện, `actualDurationSeconds = 0`).
+- **Hoạt động có cả Timer thực tế và Manual Session:** Gán nhãn chính `timer_verified`, nhưng lưu chi tiết `timerSeconds` và `manualSeconds` để báo cáo nguồn gốc minh bạch.
 
 ### 4. Nâng cấp DatabaseService & Cơ chế Atomic Replace Transaction trên 10 Stores
 - Xử lý reset `this._initPromise = null` khi `openDatabase()` gặp lỗi trong khối `.catch()`, cho phép kết nối lại an toàn.
@@ -63,12 +67,14 @@
 
 ## GIAI ĐOẠN 2: ADVANCED TIME MANAGEMENT (QUẢN LÝ THỜI GIAN NÂNG CAO)
 
-### 1. Recurring Schedule & Lưu trữ Bền vững các Lần Lặp (Occurrence Model)
+### 1. Recurring Schedule & Xử lý `ConstraintError` khi mở nhiều tab
 - **Giao dịch nguyên tử kép (Double-Store Transaction):**
   - Việc kiểm tra và tạo Occurrence cùng Activity bắt buộc thực hiện trong cùng một transaction `readwrite` bao gồm cả `recurrenceOccurrences` và `activities`.
-- **Sử dụng `add()` và Xử lý `ConstraintError` khi mở nhiều tab:**
+- **Cơ chế Xử lý `ConstraintError` tránh Abort Transaction:**
   - Sử dụng `occStore.add()` để tạo mới bản ghi lần lặp.
-  - Khi hai tab cùng mở Timeline cho cùng một ngày, tab thứ hai sẽ bắt lỗi `ConstraintError`, hủy thêm mới an toàn và chuyển sang đọc lại bản ghi qua `occStore.get(occurrenceId)`.
+  - Khi hai tab cùng mở Timeline cho cùng một ngày, tab thứ hai sẽ phát sinh `ConstraintError`.
+  - **Giải pháp chính thức:** Bắt sự kiện `onerror` tại request `add()`, gọi `event.preventDefault()` và `event.stopPropagation()` để ngăn lỗi nổi bọt làm abort transaction, sau đó đọc lại bản ghi qua `occStore.get(occurrenceId)` ngay trong transaction đó.
+  - **Giải pháp dự phòng:** Nếu transaction đã bị abort, bắt `tx.onabort` và mở một transaction `readonly` mới để đọc lại bản ghi đã được tab thứ nhất tạo thành công.
   - Tái sử dụng `generatedActivityId` từ Occurrence có sẵn, hoàn toàn loại bỏ nguy cơ tạo trùng lặp Activity giữa các tab.
 - **Quy tắc Edit Single Occurrence (Bảo toàn quan hệ nguồn):**
   - Khi người dùng chỉnh sửa riêng một lần lặp:
@@ -79,7 +85,7 @@
 - **Thao tác khác:** Bỏ qua ngày (`isCancelled = true`), sửa toàn bộ chuỗi (`activityTemplate`), xóa chuỗi lặp (xóa tương lai, giữ lịch sử quá khứ).
 
 ### 2. So sánh Kế hoạch vs Thực tế (Planned vs Actual)
-- Hiển thị thời gian dự kiến (`durationMinutes`), thời gian thực tế (`actualDurationSeconds`), nguồn dữ liệu (`actualDurationSource`) và độ chênh lệch (+/- phút).
+- Hiển thị thời gian dự kiến (`durationMinutes`), thời gian thực tế (`actualDurationSeconds`), nguồn dữ liệu (`actualDurationSource`), bóc tách `timerSeconds` và `manualSeconds`, cùng độ chênh lệch (+/- phút).
 - Thống kê đối chiếu: Phân tách rõ ràng giữa `Verified Actual Time` và `Unverified Legacy Time`.
 
 ### 3. Focus Mode & Pomodoro Timer
@@ -144,16 +150,16 @@
   1. Migration từ Database V1 rỗng lên V2 (đủ 10 stores).
   2. Migration từ Database V1 có đầy đủ 6 stores cũ (bảo toàn 100% record count).
   3. Hoạt động trạng thái `Planned` có số phút cũ = 0 (`actualDurationSeconds = 0`, `unperformed`).
-  4. Hoạt động `Completed` có timerSessions (`timer_verified`).
-  5. Hoạt động vừa có Timer vừa có cờ nhập thủ công (ưu tiên Timer, không cộng trùng).
-  6. Hoạt động có bằng chứng nhập thủ công tường minh (`manual_verified`).
+  4. Hoạt động `Completed` có timerSessions thực tế (`type !== 'manual'`, gán `timer_verified`).
+  5. Hoạt động chỉ có phiên `timerSessions` loại `type === 'manual'` (phân loại chính xác `manual_verified`, không nhầm thành `timer_verified`).
+  6. Hoạt động có cả phiên Timer thực tế và Manual Session (gán nhãn chính `timer_verified`, bóc tách `timerSeconds` và `manualSeconds`).
   7. Hoạt động `Completed` có phút cũ nhưng thiếu bằng chứng (`legacy_unverified`).
   8. Hoạt động `Planned` V1 có số phút cũ `> 0` (giữ nguyên số phút cũ, gán `legacy_unverified`).
   9. Phân tách `Verified Actual Time` vs `Unverified Legacy Time`.
   10. Xử lý lỗi rollback trong quá trình nâng cấp store.
   11. Xử lý sự kiện `onversionchange` và `onblocked` khi mở nhiều tab.
   12. Chống tạo trùng Occurrence sau Reload trang (IndexedDB persistence).
-  13. Hai tab cùng ghi đồng thời một Occurrence (dùng `add()`, bắt `ConstraintError`, không tạo Activity trùng).
+  13. Hai tab cùng ghi đồng thời một Occurrence (xử lý `ConstraintError` bằng `preventDefault()` hoặc mở transaction mới, 0 activity trùng lặp).
   14. Sửa một lần lặp (Edit Single Occurrence) giữ nguyên `recurrenceRuleId`, `originalDate`, `generatedActivityId`.
   15. Tạo Project và liên kết Activity qua index `projectId`.
   16. Tạo Project Journal Entry độc lập trong `projectJournalEntries`.
