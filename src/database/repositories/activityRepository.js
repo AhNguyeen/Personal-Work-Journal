@@ -26,6 +26,14 @@ class ActivityRepository {
     return await databaseService.getByIndex(STORES.ACTIVITIES, 'status', status);
   }
 
+  async getByProjectId(projectId) {
+    return await databaseService.getByIndex(STORES.ACTIVITIES, 'projectId', projectId);
+  }
+
+  async getByRecurrenceRuleId(ruleId) {
+    return await databaseService.getByIndex(STORES.ACTIVITIES, 'recurrenceRuleId', ruleId);
+  }
+
   async getStarred(minStars = 4) {
     const all = await this.getAll();
     return all.filter(a => Number(a.stars) >= minStars).sort((a, b) => Number(b.stars) - Number(a.stars));

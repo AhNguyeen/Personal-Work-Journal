@@ -1,6 +1,7 @@
 /**
  * databaseService.js - Centralized Database Service for IndexedDB operations
  * All CRUD transactions must go through this service.
+ * Supports 10 Object Stores, Atomic Single-Transaction Replace, and Robust Error Handling.
  */
 
 import { openDatabase, STORES, DB_NAME, DB_VERSION } from './db.js';
@@ -18,14 +19,27 @@ class DatabaseService {
   async initDatabase() {
     if (this._db) return this._db;
     if (!this._initPromise) {
-      this._initPromise = openDatabase().then((db) => {
-        this._db = db;
-        this._db.onversionchange = () => {
-          this._db.close();
+      this._initPromise = openDatabase()
+        .then((db) => {
+          this._db = db;
+          this._db.onversionchange = () => {
+            console.warn('Cơ sở dữ liệu đang nâng cấp ở tab khác, đóng kết nối tab hiện tại...');
+            this._db.close();
+            this._db = null;
+            this._initPromise = null;
+          };
+          this._db.onclose = () => {
+            this._db = null;
+            this._initPromise = null;
+          };
+          return this._db;
+        })
+        .catch((err) => {
+          // Reset _initPromise on error to avoid permanently caching a rejected promise
+          this._initPromise = null;
           this._db = null;
-        };
-        return this._db;
-      });
+          throw err;
+        });
     }
     return this._initPromise;
   }
@@ -43,8 +57,8 @@ class DatabaseService {
 
         let result;
         tx.oncomplete = () => resolve(result);
-        tx.onerror = (e) => reject(e.target.error);
-        tx.onabort = (e) => reject(new Error('Transaction aborted: ' + e.target.error));
+        tx.onerror = (e) => reject(e.target.error || new Error('Transaction error'));
+        tx.onabort = (e) => reject(new Error('Transaction aborted: ' + (e.target.error?.message || 'Aborted')));
 
         result = callback(store, tx);
       } catch (err) {
@@ -200,14 +214,14 @@ class DatabaseService {
   }
 
   /**
-   * Export all data from all stores to a unified JSON object
+   * Export all data from all 10 stores to a unified JSON object
    * @returns {Promise<Object>}
    */
   async exportData() {
     const data = {
       metadata: {
         app: 'PersonalWorkJournal',
-        version: '1.0.0',
+        version: '2.0.0',
         dbVersion: DB_VERSION,
         exportedAt: new Date().toISOString()
       },
@@ -222,49 +236,110 @@ class DatabaseService {
   }
 
   /**
+   * Deep validation of imported backup data
+   * @param {Object} importedData
+   * @throws {Error} if invalid
+   */
+  validateImportPayload(importedData) {
+    if (!importedData || typeof importedData !== 'object') {
+      throw new Error('Dữ liệu nhập không hợp lệ (không phải đối tượng JSON)');
+    }
+    if (!importedData.stores || typeof importedData.stores !== 'object') {
+      throw new Error('Dữ liệu nhập thiếu thuộc tính stores');
+    }
+
+    // Kiểm tra từng store nếu có thì phải là mảng
+    for (const [storeName, items] of Object.entries(importedData.stores)) {
+      if (items !== undefined && !Array.isArray(items)) {
+        throw new Error(`Dữ liệu của store "${storeName}" không phải là mảng`);
+      }
+    }
+  }
+
+  /**
    * Import data into IndexedDB
+   * - In Replace mode: Runs deep validation, prepares memory arrays, and executes
+   *   clear() and put() across ALL 10 Object Stores in a SINGLE ATOMIC READWRITE TRANSACTION
+   *   without any async gap (no await/setTimeout inside transaction).
    * @param {Object} importedData
    * @param {'replace'|'merge'} mode
    * @returns {Promise<{success: boolean, stats: Object}>}
    */
   async importData(importedData, mode = 'replace') {
-    if (!importedData || !importedData.stores) {
-      throw new Error('Dữ liệu nhập không đúng cấu trúc (thiếu thuộc tính stores)');
-    }
+    // 1. Deep Validation trước khi chạm vào DB
+    this.validateImportPayload(importedData);
 
-    const stats = {};
     const db = await this.initDatabase();
+    const allStoreNames = Object.values(STORES);
 
-    // Validate mode
     if (mode === 'replace') {
-      // Clear all stores first
-      for (const storeName of Object.values(STORES)) {
-        await this.clearStore(storeName);
-      }
-    }
-
-    // Insert imported items
-    for (const [storeName, items] of Object.entries(importedData.stores)) {
-      if (!Object.values(STORES).includes(storeName) || !Array.isArray(items)) {
-        continue;
+      // 2. Chuẩn bị trước toàn bộ dữ liệu trong RAM (không có async gap trong transaction)
+      const preparedData = {};
+      const stats = {};
+      for (const storeName of allStoreNames) {
+        const rawItems = importedData.stores[storeName] || [];
+        preparedData[storeName] = rawItems;
+        stats[storeName] = rawItems.length;
       }
 
-      let count = 0;
-      await this._transaction(storeName, 'readwrite', (store) => {
-        for (const item of items) {
-          if (mode === 'merge' && storeName !== STORES.SETTINGS) {
-            // For merge, preserve or ensure unique ID if needed
-            store.put(item);
-          } else {
-            store.put(item);
+      // 3. Mở duy nhất 1 Single readwrite Transaction qua CẢ 10 OBJECT STORES
+      return new Promise((resolve, reject) => {
+        try {
+          const tx = db.transaction(allStoreNames, 'readwrite');
+
+          tx.oncomplete = () => {
+            resolve({ success: true, stats, mode: 'replace' });
+          };
+
+          tx.onerror = (e) => {
+            console.error('Replace transaction error:', e.target.error);
+            reject(e.target.error || new Error('Lỗi trong phiên giao dịch Replace'));
+          };
+
+          tx.onabort = (e) => {
+            console.warn('Replace transaction aborted, rolling back all stores');
+            reject(new Error('Giao dịch Replace bị hủy (Rollback thành công): ' + (e.target.error?.message || 'Aborted')));
+          };
+
+          // Thực hiện đồng bộ liên tục trong cùng một tick:
+          // a. Clear cả 10 stores
+          for (const storeName of allStoreNames) {
+            const store = tx.objectStore(storeName);
+            store.clear();
           }
-          count++;
+
+          // b. Put toàn bộ bản ghi vào cả 10 stores
+          for (const storeName of allStoreNames) {
+            const store = tx.objectStore(storeName);
+            const items = preparedData[storeName];
+            for (let i = 0; i < items.length; i++) {
+              store.put(items[i]);
+            }
+          }
+        } catch (err) {
+          reject(err);
         }
       });
-      stats[storeName] = count;
-    }
+    } else {
+      // Mode 'merge': Chèn hoặc cập nhật
+      const stats = {};
+      for (const [storeName, items] of Object.entries(importedData.stores)) {
+        if (!allStoreNames.includes(storeName) || !Array.isArray(items)) {
+          continue;
+        }
 
-    return { success: true, stats };
+        let count = 0;
+        await this._transaction(storeName, 'readwrite', (store) => {
+          for (const item of items) {
+            store.put(item);
+            count++;
+          }
+        });
+        stats[storeName] = count;
+      }
+
+      return { success: true, stats, mode: 'merge' };
+    }
   }
 }
 
