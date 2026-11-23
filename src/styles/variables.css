@@ -1,0 +1,79 @@
+/**
+ * variables.css - Design tokens and theme custom properties
+ */
+
+:root {
+  /* Brand & Primary Colors */
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  --primary-light: #eff6ff;
+  --primary-border: #bfdbfe;
+
+  /* Neutrals */
+  --bg-app: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-sidebar: #ffffff;
+  --bg-hover: #f1f5f9;
+  --bg-active: #e2e8f0;
+
+  --text-main: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+  --text-inverse: #ffffff;
+
+  --border-subtle: #f1f5f9;
+  --border-default: #e2e8f0;
+  --border-strong: #cbd5e1;
+
+  /* Categories */
+  --cat-work: #2563eb;
+  --cat-work-bg: #eff6ff;
+  --cat-work-border: #bfdbfe;
+
+  --cat-study: #7c3aed;
+  --cat-study-bg: #f5f3ff;
+  --cat-study-border: #ddd6fe;
+
+  --cat-project: #059669;
+  --cat-project-bg: #ecfdf5;
+  --cat-project-border: #a7f3d0;
+
+  --cat-personal: #d97706;
+  --cat-personal-bg: #fffbeb;
+  --cat-personal-border: #fde68a;
+
+  --cat-break: #db2777;
+  --cat-break-bg: #fdf2f8;
+  --cat-break-border: #fbcfe8;
+
+  --cat-other: #475569;
+  --cat-other-bg: #f8fafc;
+  --cat-other-border: #e2e8f0;
+
+  /* Status Colors */
+  --status-planned: #64748b;
+  --status-progress: #2563eb;
+  --status-completed: #10b981;
+  --status-cancelled: #ef4444;
+
+  /* Shadows */
+  --shadow-xs: 0 1px 2px 0 rgba(15, 23, 42, 0.05);
+  --shadow-sm: 0 1px 3px 0 rgba(15, 23, 42, 0.08), 0 1px 2px -1px rgba(15, 23, 42, 0.08);
+  --shadow-md: 0 4px 6px -1px rgba(15, 23, 42, 0.08), 0 2px 4px -2px rgba(15, 23, 42, 0.08);
+  --shadow-lg: 0 10px 15px -3px rgba(15, 23, 42, 0.08), 0 4px 6px -4px rgba(15, 23, 42, 0.08);
+  --shadow-modal: 0 20px 25px -5px rgba(15, 23, 42, 0.12), 0 8px 10px -6px rgba(15, 23, 42, 0.12);
+
+  /* Radius */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-full: 9999px;
+
+  /* Layout Dimensions */
+  --sidebar-width: 250px;
+  --header-height: 64px;
+
+  /* Typography */
+  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
