@@ -42,10 +42,11 @@ class RecurrenceOccurrenceRepository {
    * @param {Object} rule
    * @param {string} date
    * @param {Function} createActivityCallback - Function that creates and returns new activity record
+   * @param {IDBDatabase} [customDb=null] - Optional independent database connection for multi-tab testing
    * @returns {Promise<{ activityId: string, isCreated: boolean }>}
    */
-  async ensureOccurrence(rule, date, createActivityCallback) {
-    const db = await databaseService.initDatabase();
+  async ensureOccurrence(rule, date, createActivityCallback, customDb = null) {
+    const db = customDb || await databaseService.initDatabase();
     const occurrenceId = `occ_${rule.id}_${date}`;
 
     return new Promise((resolve, reject) => {

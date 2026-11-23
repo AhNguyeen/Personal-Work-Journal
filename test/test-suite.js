@@ -400,34 +400,41 @@ async function runAllTests() {
     assert.strictEqual(fetched.generatedActivityId, 'act_gen_1');
   });
 
-  // MIG-13: Hai tab cùng ghi đồng thời Occurrence -> Promise wrapper xử lý ConstraintError, 0 trùng lặp
-  await test('MIG-13: ensureOccurrence handles ConstraintError race condition without duplicate activity', async () => {
+  // MIG-13: Hai tab độc lập (2 connection IDB riêng) cùng ghi đồng thời Occurrence -> 0 trùng lặp
+  await test('MIG-13: ensureOccurrence handles ConstraintError across 2 independent database connections', async () => {
     const rule = {
-      id: 'rule_concurrency_test',
-      title: 'Lịch định kỳ test'
+      id: 'rule_concurrency_tabs',
+      title: 'Lịch định kỳ đa tab'
     };
     const date = '2026-11-26';
+
+    // Mở 2 kết nối database độc lập mô phỏng 2 tab trình duyệt thực tế
+    const tab1Db = await openDatabase();
+    const tab2Db = await openDatabase();
 
     let activityCreatedCount = 0;
     const createActCb = (r, d, occId) => {
       activityCreatedCount++;
       return {
-        id: `act_concurrency_${activityCreatedCount}`,
+        id: `act_multitab_${activityCreatedCount}`,
         title: r.title,
         date: d,
         occurrenceId: occId
       };
     };
 
-    // Chạy song song đồng thời (True Concurrency Race via Promise.all)
+    // Tab 1 và Tab 2 cùng ghi đồng thời qua 2 kết nối riêng biệt
     const [res1, res2] = await Promise.all([
-      recurrenceOccurrenceRepository.ensureOccurrence(rule, date, createActCb),
-      recurrenceOccurrenceRepository.ensureOccurrence(rule, date, createActCb)
+      recurrenceOccurrenceRepository.ensureOccurrence(rule, date, createActCb, tab1Db),
+      recurrenceOccurrenceRepository.ensureOccurrence(rule, date, createActCb, tab2Db)
     ]);
 
-    assert.strictEqual(activityCreatedCount, 1, 'Only 1 activity must ever be created even under concurrent race');
-    assert.strictEqual(res1.activityId, res2.activityId, 'Both concurrent callers must return the same activityId');
-    assert.strictEqual((res1.isCreated && !res2.isCreated) || (!res1.isCreated && res2.isCreated), true, 'Exactly one caller created the occurrence');
+    assert.strictEqual(activityCreatedCount, 1, 'Only 1 activity must ever be created even under multi-tab connection race');
+    assert.strictEqual(res1.activityId, res2.activityId, 'Both tabs must resolve the exact same activityId');
+    assert.strictEqual((res1.isCreated && !res2.isCreated) || (!res1.isCreated && res2.isCreated), true, 'Exactly one tab created the occurrence');
+
+    tab1Db.close();
+    tab2Db.close();
   });
 
   // MIG-14: Sửa một lần lặp (Edit Single Occurrence) giữ nguyên quan hệ nguồn
@@ -578,33 +585,60 @@ async function runAllTests() {
     assert.ok(storeKeys.includes('projects'));
   });
 
-  // MIG-21: Replace mode hoàn trả nguyên trạng (Rollback) khi bản ghi bị lỗi, bảo vệ toàn vẹn dữ liệu
-  await test('MIG-21: Replace mode rolls back completely when corrupt record fails validation or insertion', async () => {
-    // Lưu một activity an toàn ban đầu
-    const originalAct = { id: 'act_safe_keep', title: 'Hoạt động an toàn', date: '2026-11-25', startTime: '08:00', endTime: '09:00' };
+  // MIG-21: Replace mode hoàn trả nguyên trạng (Rollback) khi transaction IndexedDB bị abort trong lúc ghi
+  await test('MIG-21: Replace mode rolls back completely when an in-transaction ConstraintError aborts execution', async () => {
+    // 1. Lưu dữ liệu ban đầu cần được bảo vệ tuyệt đối
+    const originalAct = {
+      id: 'act_safe_orig_rollback',
+      title: 'Hoạt động bảo vệ nguyên vẹn',
+      date: '2026-11-25',
+      startTime: '08:00',
+      endTime: '09:00',
+      stars: 3
+    };
     await activityRepository.add(originalAct);
 
-    // Payload thiếu khóa chính trong store activities
-    const corruptPayload = {
+    const originalDailyNote = {
+      id: 'dn_safe_orig_rollback',
+      date: '2026-11-25',
+      content: 'Nhật ký gốc cần bảo vệ'
+    };
+    await databaseService.add(STORES.DAILY_NOTES, originalDailyNote);
+
+    // 2. Chuẩn bị payload vượt qua bước validateImportPayload (mọi id, date, time đều hợp lệ)
+    // Nhưng cố tình chứa 2 bản ghi trùng trường "date" trong dailyNotes (store có unique index trên 'date')
+    const inTransactionFailingPayload = {
       metadata: { app: 'PersonalWorkJournal', version: '2.0.0', dbVersion: 2 },
       stores: {
         activities: [
-          { title: 'Bản ghi không có ID' } // thiếu primary key 'id'
+          { id: 'act_temp_should_rollback', title: 'Tạm thời', date: '2026-11-26', startTime: '10:00', endTime: '11:00', stars: 3 }
+        ],
+        dailyNotes: [
+          { id: 'dn_dup_first', date: '2026-11-26', content: 'Bản ghi 1' },
+          { id: 'dn_dup_second', date: '2026-11-26', content: 'Bản ghi 2 trùng date (gây ConstraintError trong transaction)' }
         ]
       }
     };
 
-    let errorThrown = false;
+    // 3. Thực thi importData -> transaction mở, clear() thực hiện, nhưng khi put bản ghi 2 bị lỗi ConstraintError
+    let transactionAborted = false;
     try {
-      await databaseService.importData(corruptPayload, 'replace');
+      await databaseService.importData(inTransactionFailingPayload, 'replace');
     } catch (e) {
-      errorThrown = true;
+      transactionAborted = true;
     }
-    assert.strictEqual(errorThrown, true, 'Validation must reject missing primary key');
+    assert.strictEqual(transactionAborted, true, 'Transaction must abort due to unique constraint on dailyNotes.date');
 
-    // Kiểm tra bản ghi ban đầu vẫn còn nguyên vẹn 100% (không bị xóa hay ghi đè)
-    const retained = await activityRepository.getById('act_safe_keep');
-    assert.ok(retained, 'Original data must remain intact after rejected replace');
+    // 4. KIỂM CHỨNG ROLLBACK: Dữ liệu ban đầu vẫn còn nguyên vẹn 100% trong cả 2 store
+    const retainedAct = await activityRepository.getById('act_safe_orig_rollback');
+    assert.ok(retainedAct, 'Original activity must be preserved by transaction rollback');
+
+    const retainedDn = await databaseService.getById(STORES.DAILY_NOTES, 'dn_safe_orig_rollback');
+    assert.ok(retainedDn, 'Original dailyNote must be preserved by transaction rollback');
+
+    // Dữ liệu tạm thời trong payload lỗi không được phép tồn tại
+    const ghostAct = await activityRepository.getById('act_temp_should_rollback');
+    assert.strictEqual(ghostAct, null, 'Temporary activity must not exist after rollback');
   });
 
   // MIG-22: IndexedDB V1 to V2 migration accurately cross-references timerSessions with Whitelist
@@ -688,6 +722,132 @@ async function runAllTests() {
     assert.strictEqual(act4.actualDurationSeconds, 0);
 
     upgradedDb.close();
+  });
+
+  // MIG-23: Cập nhật Activity (chỉ sửa title/date/stars) bảo toàn 100% provenance timer_verified và manual_verified
+  await test('MIG-23: updateActivity preserves timer_verified and manual_verified when editing general fields', async () => {
+    // 1. Tạo hoạt động có nguồn timer_verified
+    const originalTimerAct = await activityService.createActivity({
+      title: 'Hoạt động đo timer',
+      date: '2026-11-25',
+      startTime: '10:00',
+      endTime: '11:00',
+      status: 'Completed',
+      stars: 4,
+      actualDurationSource: 'timer_verified',
+      actualDurationSeconds: 3600,
+      timerSeconds: 3600,
+      hasTimerProof: true
+    }, true);
+
+    // Người dùng mở modal chỉnh sửa, chỉ sửa tiêu đề và ngày, form không gửi lại provenance
+    const updatedTimerAct = await activityService.updateActivity({
+      id: originalTimerAct.id,
+      title: 'Tiêu đề mới sau khi chỉnh sửa',
+      date: '2026-11-26',
+      startTime: '10:00',
+      endTime: '11:00',
+      status: 'Completed',
+      stars: 5
+    }, true);
+
+    // Xác minh tuyệt đối: Nguồn timer_verified và số giây timer KHÔNG bị hạ cấp thành legacy_unverified
+    assert.strictEqual(updatedTimerAct.title, 'Tiêu đề mới sau khi chỉnh sửa');
+    assert.strictEqual(updatedTimerAct.date, '2026-11-26');
+    assert.strictEqual(updatedTimerAct.actualDurationSource, 'timer_verified', 'Must preserve timer_verified after editing general fields');
+    assert.strictEqual(updatedTimerAct.timerSeconds, 3600);
+    assert.strictEqual(updatedTimerAct.actualDurationSeconds, 3600);
+    assert.strictEqual(updatedTimerAct.actualDurationMinutes, 60);
+
+    // 2. Tạo hoạt động có nguồn manual_verified
+    const originalManualAct = await activityService.createActivity({
+      title: 'Hoạt động log tay',
+      date: '2026-11-25',
+      startTime: '14:00',
+      endTime: '15:00',
+      status: 'Completed',
+      stars: 3,
+      manuallyConfirmed: true,
+      actualDurationMinutes: 45
+    }, true);
+    assert.strictEqual(originalManualAct.actualDurationSource, 'manual_verified');
+
+    // Chỉnh sửa chỉ gửi thông tin cơ bản
+    const updatedManualAct = await activityService.updateActivity({
+      id: originalManualAct.id,
+      title: 'Hoạt động log tay - Sửa mô tả',
+      description: 'Mô tả mới',
+      date: '2026-11-25',
+      startTime: '14:00',
+      endTime: '15:00',
+      status: 'Completed'
+    }, true);
+
+    assert.strictEqual(updatedManualAct.actualDurationSource, 'manual_verified', 'Must preserve manual_verified after editing general fields');
+    assert.strictEqual(updatedManualAct.actualDurationMinutes, 45);
+  });
+
+  // MIG-24: Deep business schema validation từ chối date, time, actualDurationSource và số liệu sai định dạng
+  await test('MIG-24: Deep business schema validation rejects malformed dates, times, sources, and negative numbers', async () => {
+    // 1. Sai định dạng date
+    let errDateCaught = false;
+    try {
+      await databaseService.importData({
+        stores: {
+          activities: [
+            { id: 'act_bad_date', title: 'Task', date: '25-11-2026', startTime: '09:00', endTime: '10:00' }
+          ]
+        }
+      }, 'replace');
+    } catch (e) {
+      errDateCaught = e.message.includes('YYYY-MM-DD');
+    }
+    assert.strictEqual(errDateCaught, true, 'Must reject non-YYYY-MM-DD date format');
+
+    // 2. Sai định dạng time
+    let errTimeCaught = false;
+    try {
+      await databaseService.importData({
+        stores: {
+          activities: [
+            { id: 'act_bad_time', title: 'Task', date: '2026-11-25', startTime: '9:00', endTime: '10:00' }
+          ]
+        }
+      }, 'replace');
+    } catch (e) {
+      errTimeCaught = e.message.includes('HH:mm');
+    }
+    assert.strictEqual(errTimeCaught, true, 'Must reject non-HH:mm time format');
+
+    // 3. Sai actualDurationSource enum
+    let errSourceCaught = false;
+    try {
+      await databaseService.importData({
+        stores: {
+          activities: [
+            { id: 'act_bad_source', title: 'Task', date: '2026-11-25', startTime: '09:00', endTime: '10:00', actualDurationSource: 'invalid_source' }
+          ]
+        }
+      }, 'replace');
+    } catch (e) {
+      errSourceCaught = e.message.includes('actualDurationSource');
+    }
+    assert.strictEqual(errSourceCaught, true, 'Must reject invalid actualDurationSource');
+
+    // 4. Số âm breakMinutes
+    let errNumCaught = false;
+    try {
+      await databaseService.importData({
+        stores: {
+          activities: [
+            { id: 'act_bad_num', title: 'Task', date: '2026-11-25', startTime: '09:00', endTime: '10:00', breakMinutes: -10 }
+          ]
+        }
+      }, 'replace');
+    } catch (e) {
+      errNumCaught = e.message.includes('breakMinutes');
+    }
+    assert.strictEqual(errNumCaught, true, 'Must reject negative numbers in breakMinutes');
   });
 
   console.log('\n================================================================');

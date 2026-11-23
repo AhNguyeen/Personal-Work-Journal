@@ -285,6 +285,10 @@ export class TimeTrackingPage {
       const act = this.activities.find(a => a.id === actId);
       if (act) {
         act.actualDurationMinutes = mins;
+        act.actualDurationSeconds = mins * 60;
+        act.manualSeconds = mins * 60;
+        act.manuallyConfirmed = true;
+        act.actualDurationSource = 'manual_verified';
         act.status = 'Completed';
         await activityService.updateActivity(act, true);
         toast.success(`Đã cập nhật thời gian thực tế: ${formatDuration(mins)} cho "${act.title}"`);

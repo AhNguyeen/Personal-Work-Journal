@@ -297,15 +297,19 @@ class ActivityService {
    * @param {boolean} allowOverlap
    */
   async updateActivity(rawData, allowOverlap = false) {
+    const existing = await activityRepository.getById(rawData.id);
+    if (!existing) {
+      throw new Error('Hoạt động không tồn tại hoặc đã bị xóa');
+    }
+
+    if (rawData.stars === undefined || rawData.stars === null) {
+      rawData.stars = existing.stars !== undefined ? existing.stars : 3;
+    }
+
     const validation = validateActivity(rawData);
     if (!validation.isValid) {
       const firstError = Object.values(validation.errors)[0];
       throw new Error(firstError);
-    }
-
-    const existing = await activityRepository.getById(rawData.id);
-    if (!existing) {
-      throw new Error('Hoạt động không tồn tại hoặc đã bị xóa');
     }
 
     if (!allowOverlap) {
@@ -325,13 +329,28 @@ class ActivityService {
       rawData.breakMinutes || 0
     );
 
+    // BẢO VỆ PROVENANCE: Hòa trộn context bản ghi hiện có (existing)
+    // Nếu form chỉnh sửa chỉ sửa tiêu đề, ngày, giờ hoặc danh mục mà không truyền lại provenance,
+    // giữ nguyên 100% nguồn gốc và thời gian đã được xác minh (timer_verified, manual_verified, legacy_unverified).
+    const mergedData = {
+      ...existing,
+      ...rawData,
+      actualDurationSource: rawData.actualDurationSource !== undefined ? rawData.actualDurationSource : existing.actualDurationSource,
+      actualDurationSeconds: rawData.actualDurationSeconds !== undefined ? rawData.actualDurationSeconds : existing.actualDurationSeconds,
+      actualDurationMinutes: rawData.actualDurationMinutes !== undefined ? rawData.actualDurationMinutes : existing.actualDurationMinutes,
+      timerSeconds: rawData.timerSeconds !== undefined ? rawData.timerSeconds : existing.timerSeconds,
+      manualSeconds: rawData.manualSeconds !== undefined ? rawData.manualSeconds : existing.manualSeconds,
+      hasTimerProof: rawData.hasTimerProof !== undefined ? rawData.hasTimerProof : ((existing.timerSeconds || 0) > 0 || existing.actualDurationSource === 'timer_verified'),
+      manuallyConfirmed: rawData.manuallyConfirmed !== undefined ? rawData.manuallyConfirmed : existing.manuallyConfirmed
+    };
+
     const {
       actualDurationSeconds,
       actualDurationMinutes,
       actualDurationSource,
       timerSeconds,
       manualSeconds
-    } = this._resolveDurationAndProvenance(rawData, durationMinutes);
+    } = this._resolveDurationAndProvenance(mergedData, durationMinutes);
 
     const updated = {
       ...existing,

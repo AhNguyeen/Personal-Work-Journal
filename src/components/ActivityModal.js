@@ -276,7 +276,18 @@ class ActivityModal {
       endTime,
       breakMinutes,
       stars: this.selectedStars,
-      relatedNote
+      relatedNote,
+      // Bảo tồn provenance từ currentActivity khi chỉnh sửa thông tin chung
+      ...(this.currentActivity ? {
+        actualDurationMinutes: this.currentActivity.actualDurationMinutes,
+        actualDurationSeconds: this.currentActivity.actualDurationSeconds,
+        actualDurationSource: this.currentActivity.actualDurationSource,
+        timerSeconds: this.currentActivity.timerSeconds,
+        manualSeconds: this.currentActivity.manualSeconds,
+        projectId: this.currentActivity.projectId,
+        recurrenceRuleId: this.currentActivity.recurrenceRuleId,
+        isOccurrenceOverridden: this.currentActivity.isOccurrenceOverridden
+      } : {})
     };
 
     try {

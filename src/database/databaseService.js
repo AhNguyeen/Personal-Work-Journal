@@ -269,6 +269,14 @@ class DatabaseService {
       [STORES.PROJECT_JOURNAL_ENTRIES]: 'id'
     };
 
+    const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+    const TIME_REGEX = /^\d{2}:\d{2}$/;
+    const VALID_PROVENANCE_SOURCES = new Set(['timer_verified', 'manual_verified', 'legacy_unverified', 'unperformed']);
+    const VALID_ACTIVITY_STATUSES = new Set(['Planned', 'Completed', 'In Progress', 'Cancelled']);
+    const VALID_TIMER_STATUSES = new Set(['running', 'paused', 'completed']);
+    const VALID_TIMER_TYPES = new Set(['timer', 'pomodoro', 'manual']);
+    const VALID_RECURRENCE_TYPES = new Set(['daily', 'weekly', 'weekdays', 'custom']);
+
     // Kiểm tra từng store và từng bản ghi
     for (const storeName of storeKeys) {
       const items = importedData.stores[storeName];
@@ -285,6 +293,88 @@ class DatabaseService {
         const val = item[expectedKey];
         if (val === undefined || val === null || (typeof val === 'string' && val.trim() === '')) {
           throw new Error(`Bản ghi trong store "${storeName}" thiếu khóa chính "${expectedKey}"`);
+        }
+
+        // ==========================================
+        // BUSINESS & SCHEMA VALIDATION CHO TỪNG STORE
+        // ==========================================
+        if (storeName === STORES.ACTIVITIES) {
+          if (!item.title || typeof item.title !== 'string' || item.title.trim() === '') {
+            throw new Error(`Bản ghi hoạt động "${val}" thiếu tiêu đề (title)`);
+          }
+          if (!item.date || !DATE_REGEX.test(item.date)) {
+            throw new Error(`Bản ghi hoạt động "${val}" có trường "date" không đúng định dạng YYYY-MM-DD: "${item.date}"`);
+          }
+          if (!item.startTime || !TIME_REGEX.test(item.startTime)) {
+            throw new Error(`Bản ghi hoạt động "${val}" có trường "startTime" không đúng định dạng HH:mm: "${item.startTime}"`);
+          }
+          if (!item.endTime || !TIME_REGEX.test(item.endTime)) {
+            throw new Error(`Bản ghi hoạt động "${val}" có trường "endTime" không đúng định dạng HH:mm: "${item.endTime}"`);
+          }
+          if (item.actualDurationSource !== undefined && !VALID_PROVENANCE_SOURCES.has(item.actualDurationSource)) {
+            throw new Error(`Bản ghi hoạt động "${val}" có "actualDurationSource" không hợp lệ: "${item.actualDurationSource}"`);
+          }
+          if (item.status !== undefined && !VALID_ACTIVITY_STATUSES.has(item.status)) {
+            throw new Error(`Bản ghi hoạt động "${val}" có trạng thái "status" không hợp lệ: "${item.status}"`);
+          }
+          if (item.stars !== undefined && (typeof item.stars !== 'number' || isNaN(item.stars) || item.stars < 1 || item.stars > 5)) {
+            throw new Error(`Bản ghi hoạt động "${val}" có mức đánh giá "stars" không hợp lệ (phải từ 1 đến 5): "${item.stars}"`);
+          }
+          const numFields = ['breakMinutes', 'durationMinutes', 'actualDurationMinutes', 'actualDurationSeconds', 'timerSeconds', 'manualSeconds'];
+          for (const nf of numFields) {
+            if (item[nf] !== undefined && (typeof item[nf] !== 'number' || isNaN(item[nf]) || item[nf] < 0)) {
+              throw new Error(`Bản ghi hoạt động "${val}" có trường số "${nf}" không hợp lệ: "${item[nf]}"`);
+            }
+          }
+        } else if (storeName === STORES.DAILY_NOTES) {
+          if (!item.date || !DATE_REGEX.test(item.date)) {
+            throw new Error(`Bản ghi nhật ký ngày "${val}" có trường "date" không đúng định dạng YYYY-MM-DD: "${item.date}"`);
+          }
+        } else if (storeName === STORES.NOTES) {
+          if (item.date !== undefined && !DATE_REGEX.test(item.date)) {
+            throw new Error(`Bản ghi ghi chú "${val}" có trường "date" không đúng định dạng YYYY-MM-DD: "${item.date}"`);
+          }
+        } else if (storeName === STORES.TIMER_SESSIONS) {
+          if (!item.activityId || typeof item.activityId !== 'string') {
+            throw new Error(`Bản ghi phiên đếm giờ "${val}" thiếu activityId liên kết`);
+          }
+          if (item.status !== undefined && !VALID_TIMER_STATUSES.has(item.status)) {
+            throw new Error(`Bản ghi phiên đếm giờ "${val}" có trạng thái không hợp lệ: "${item.status}"`);
+          }
+          if (item.type !== undefined && !VALID_TIMER_TYPES.has(item.type)) {
+            throw new Error(`Bản ghi phiên đếm giờ "${val}" có loại "type" không hợp lệ: "${item.type}"`);
+          }
+          if (item.totalSeconds !== undefined && (typeof item.totalSeconds !== 'number' || isNaN(item.totalSeconds) || item.totalSeconds < 0)) {
+            throw new Error(`Bản ghi phiên đếm giờ "${val}" có trường totalSeconds không hợp lệ: "${item.totalSeconds}"`);
+          }
+        } else if (storeName === STORES.PROJECTS) {
+          if (!item.name || typeof item.name !== 'string' || item.name.trim() === '') {
+            throw new Error(`Bản ghi dự án "${val}" thiếu tên dự án (name)`);
+          }
+        } else if (storeName === STORES.RECURRENCE_RULES) {
+          if (!item.startDate || !DATE_REGEX.test(item.startDate)) {
+            throw new Error(`Bản ghi quy tắc định kỳ "${val}" có trường "startDate" không đúng định dạng YYYY-MM-DD: "${item.startDate}"`);
+          }
+          if (item.endDate !== undefined && item.endDate !== null && !DATE_REGEX.test(item.endDate)) {
+            throw new Error(`Bản ghi quy tắc định kỳ "${val}" có trường "endDate" không đúng định dạng YYYY-MM-DD: "${item.endDate}"`);
+          }
+          if (item.recurrenceType !== undefined && !VALID_RECURRENCE_TYPES.has(item.recurrenceType)) {
+            throw new Error(`Bản ghi quy tắc định kỳ "${val}" có recurrenceType không hợp lệ: "${item.recurrenceType}"`);
+          }
+        } else if (storeName === STORES.RECURRENCE_OCCURRENCES) {
+          if (!item.recurrenceRuleId || typeof item.recurrenceRuleId !== 'string') {
+            throw new Error(`Bản ghi lần lặp "${val}" thiếu recurrenceRuleId`);
+          }
+          if (!item.originalDate || !DATE_REGEX.test(item.originalDate)) {
+            throw new Error(`Bản ghi lần lặp "${val}" có trường "originalDate" không đúng định dạng YYYY-MM-DD: "${item.originalDate}"`);
+          }
+        } else if (storeName === STORES.PROJECT_JOURNAL_ENTRIES) {
+          if (!item.projectId || typeof item.projectId !== 'string') {
+            throw new Error(`Bản ghi bài viết tiến độ "${val}" thiếu projectId`);
+          }
+          if (!item.date || !DATE_REGEX.test(item.date)) {
+            throw new Error(`Bản ghi bài viết tiến độ "${val}" có trường "date" không đúng định dạng YYYY-MM-DD: "${item.date}"`);
+          }
         }
       }
     }
