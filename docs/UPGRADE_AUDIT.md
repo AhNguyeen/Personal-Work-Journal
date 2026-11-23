@@ -49,9 +49,13 @@
     - **Rủi ro Auto-Commit do Async Gap:** Nếu có thao tác bất đồng bộ (`await`, `setTimeout`) trong transaction, transaction sẽ tự động commit và đóng trước khi ghi xong. Toàn bộ validation và chuẩn bị dữ liệu phải hoàn tất 100% trước khi mở transaction.
     - **Giới hạn của Snapshot trong RAM:** Bản chụp bộ nhớ RAM chỉ là lớp hỗ trợ ở tầng ứng dụng, không thể bảo đảm phục hồi nếu tab trình duyệt bị crash hoặc tiến trình bị tắt đột ngột. Cơ chế rollback cốt lõi phải dựa vào IndexedDB Transaction Rollback.
 
-### 2. Tầng nghiệp vụ & Phân biệt rõ Timer thực tế và Nhập tay (Actual Duration Provenance)
-- **Kiểm toán phân loại nguồn thời gian thực tế:**
-  1. **`timer_verified` (Ưu tiên 1):** Phải có ít nhất 1 phiên hoàn tất trong `timerSessions` có **`type !== 'manual'`** (tức là được đo bằng đồng hồ Stopwatch hoặc Pomodoro thực tế).
+### 2. Tầng nghiệp vụ & Whitelist phân biệt Timer thực tế vs Nhập tay (Actual Duration Provenance)
+- **Kiểm toán phân loại nguồn thời gian thực tế bằng Whitelist:**
+  1. **`timer_verified` (Ưu tiên 1):** Bắt buộc sử dụng Whitelist tường minh:
+     ```javascript
+     session.status === 'completed' && (session.type === 'timer' || session.type === 'pomodoro') && session.totalSeconds > 0
+     ```
+     **Tuyệt đối không dùng phủ định `type !== 'manual'`** để tránh nhận nhầm các bản ghi thiếu `type` hoặc có giá trị rác.
   2. **`manual_verified` (Ưu tiên 2):** Bao gồm:
      - Các phiên hoàn tất trong `timerSessions` có **`type === 'manual'`** (người dùng tự log tay). **Quy định nghiêm ngặt: Phiên `manual` trong `timerSessions` tuyệt đối không được phân loại nhầm thành `timer_verified`.**
      - Hoặc Activity có cờ bằng chứng xác nhận thủ công (`manuallyConfirmed === true`, `manualEntry === true`, `source === 'manual'`).
@@ -60,17 +64,19 @@
      - **Bảo toàn dữ liệu lịch sử:** Đối với Activity V1 trạng thái `Planned` có số phút cũ, bắt buộc giữ nguyên giá trị lịch sử (không xóa, không reset về 0), gán `actualDurationSeconds = actualDurationMinutes * 60` và gắn nhãn `legacy_unverified`.
      - **Tách bạch tính toán:** Dữ liệu `legacy_unverified` **tuyệt đối KHÔNG được tính chung** vào `Verified Actual Time`. Tách riêng thành chỉ số "Thời gian ước tính cũ / Chưa xác minh" (Unverified Legacy Time) trong báo cáo.
   4. **`unperformed` (Ưu tiên 4):** Hoạt động `Planned` và `actualDurationMinutes === 0` (hoặc rỗng), thời gian thực tế = 0.
-- **Xử lý hoạt động có cả 2 loại phiên:** Nếu vừa có phiên `timer` vừa có phiên `manual`, gán nhãn chính `timer_verified` nhưng lưu metadata bóc tách chi tiết `timerSeconds` và `manualSeconds` để báo cáo nguồn minh bạch.
+- **Xử lý hoạt động có cả 2 loại phiên:** Nếu vừa có phiên `timer` / `pomodoro` vừa có phiên `manual`, gán nhãn chính `timer_verified` nhưng lưu metadata bóc tách chi tiết `timerSeconds` và `manualSeconds` để báo cáo nguồn minh bạch.
 
-### 3. Kiểm toán Lịch lặp lại & Xử lý `ConstraintError` khi hai tab cùng tạo Occurrence
+### 3. Kiểm toán Lịch lặp lại & Xử lý `ConstraintError` bằng Promise Wrapper hợp lệ
 - **Scope giao dịch nguyên tử:** Việc kiểm tra và tạo Occurrence cùng Activity bắt buộc phải thực hiện trong một transaction `readwrite` bao gồm cả `recurrenceOccurrences` và `activities`.
 - **Vấn đề kỹ thuật với `ConstraintError`:**
   - Khi dùng `occStore.add()`, nếu khóa `occurrenceId` đã tồn tại (do tab khác vừa tạo), request sẽ ném lỗi `ConstraintError`.
   - Mặc định, lỗi này sẽ nổi bọt và **khiến transaction tự động bị abort**. Khi transaction đã abort thì không thể tiếp tục dùng chính transaction đó để đọc dữ liệu.
-- **Giải pháp kiểm toán chuẩn mực:**
-  - **Phương án 1 (Chính thức):** Bắt sự kiện `onerror` tại request `add()`, gọi `event.preventDefault()` và `event.stopPropagation()` để ngăn lỗi nổi bọt lên transaction, sau đó đọc lại bản ghi bằng `occStore.get(occurrenceId)` ngay trong transaction còn sống.
-  - **Phương án 2 (Dự phòng):** Nếu transaction đã abort, lắng nghe `tx.onabort` hoặc catch error, mở một transaction `readonly` mới để đọc lại bản ghi `occurrenceId` đã tồn tại và lấy `generatedActivityId` tương ứng.
-  - Cả hai cách đều bảo đảm **tuyệt đối không tạo Activity trùng lặp giữa hai tab**.
+  - `store.get()` trả về `IDBRequest`, không phải là `Promise` để `await` trực tiếp. Lệnh `return` trong callback `tx.onabort` không trả được kết quả về cho hàm gọi ngoài.
+- **Giải pháp kiểm toán chuẩn mực (Promise Wrapper):**
+  - Toàn bộ thao tác `ensureOccurrence` được bọc trong một `Promise`:
+    - **Phương án 1 (Chính thức):** Bắt sự kiện `onerror` tại request `add()`, gọi `event.preventDefault()` và `event.stopPropagation()` để ngăn lỗi nổi bọt lên transaction, sau đó đọc lại bản ghi bằng `occStore.get(occurrenceId)` qua callback `onsuccess` ngay trong transaction còn sống và gọi `resolve()` trả về `generatedActivityId`.
+    - **Phương án 2 (Dự phòng chuẩn mực):** Nếu transaction bị abort, bắt `tx.onabort`, mở transaction `readonly` MỚI, đọc lại bản ghi qua `readReq.onsuccess`, và gọi `resolve()` trả về `generatedActivityId` đã được tab thắng commit bền vững trên đĩa.
+  - Cả hai cách đều bảo đảm **tuyệt đối không tạo Activity trùng lặp giữa hai tab**, không làm crash ứng dụng và trả kết quả chính xác về hàm gọi ngoài.
 - **Quy tắc Edit Single Occurrence:**
   - Giữ nguyên `recurrenceRuleId`, `originalDate`, `generatedActivityId` trong `recurrenceOccurrences` và cập nhật `isOverridden = true`.
   - Activity cập nhật thông tin riêng, giữ nguyên liên kết `recurrenceRuleId`, `occurrenceId` và đánh dấu `isOccurrenceOverridden: true`.
@@ -89,9 +95,9 @@
 | **SEC-01** | Global Search | XSS qua nội dung tìm kiếm chưa escape HTML | **P0 - Critical** | Áp dụng `escapeHTML` cho tất cả thuộc tính hiển thị |
 | **DATA-01** | IndexedDB | `_initPromise` bị kẹt khi lỗi, thiếu `onblocked`/`onclose` | **P0 - Critical** | Reset promise trong `.catch()`, thêm handler `onblocked` |
 | **DATA-02** | Activity Service | `actualDurationMinutes` tự gán bằng `durationMinutes` | **P0 - Critical** | Chuẩn hóa `actualDurationSeconds` và phân loại 4 nguồn dữ liệu |
-| **DATA-03** | Actual Provenance | Phân loại nhầm phiên `manual` trong `timerSessions` thành timer | **P0 - Critical** | Phân biệt `type !== 'manual'`, bảo toàn lịch sử Planned cũ |
+| **DATA-03** | Actual Provenance | Điều kiện Timer lỏng lẻo (`!== 'manual'`), nhầm lẫn manual log | **P0 - Critical** | Dùng whitelist `timer` \|\| `pomodoro`, bảo toàn lịch sử Planned cũ |
 | **DATA-04** | Backup/Restore | Nguy cơ mất dữ liệu do chia nhỏ transaction & async gap | **P1 - High** | Validate trước, 1 transaction readwrite qua 10 stores, không async gap |
-| **DATA-05** | Recurrence Store | Lỗi `ConstraintError` gây abort transaction khi 2 tab tạo occurrence | **P1 - High** | Xử lý `preventDefault()` hoặc mở transaction mới, transaction kép occ + act |
+| **DATA-05** | Recurrence Store | Lỗi `ConstraintError` gây abort transaction & sai sót Promise return | **P1 - High** | Thiết kế Promise Wrapper chuẩn mực, xử lý `preventDefault` và fallback |
 | **FEAT-01** | Recurrence Rules | Chưa có quy tắc lịch lặp lại (daily, weekly, custom) | **P1 - High** | Thêm Object Store `recurrenceRules` và mô hình quan hệ nguồn bền vững |
 | **FEAT-02** | Project Journal | Chưa có hồ sơ dự án và nhật ký tiến độ dự án riêng | **P1 - High** | Thêm Object Store `projects` và `projectJournalEntries` độc lập |
 | **FEAT-03** | Advanced Time | Chưa có Focus Mode riêng và Pomodoro Timer | **P1 - High** | Nâng cấp `timerService` hỗ trợ Pomodoro & Focus Screen |
@@ -124,10 +130,10 @@
 | `src/database/repositories/recurrenceRepository.js` | **Tạo mới** | Repository | Repository CRUD cho Object Store `recurrenceRules` |
 | `src/database/repositories/recurrenceOccurrenceRepository.js` | **Tạo mới** | Repository | Repository CRUD cho Object Store `recurrenceOccurrences` |
 | `src/database/repositories/projectJournalRepository.js` | **Tạo mới** | Repository | Repository CRUD cho Object Store `projectJournalEntries` |
-| `src/services/activityService.js` | Chỉnh sửa | Service | Chuẩn hóa `actualDurationSeconds`, liên kết `projectId` & `recurrenceRuleId`, bóc tách timer vs manual |
+| `src/services/activityService.js` | Chỉnh sửa | Service | Chuẩn hóa `actualDurationSeconds`, liên kết `projectId` & `recurrenceRuleId`, whitelist timer vs manual |
 | `src/services/timerService.js` | Chỉnh sửa | Service | Hỗ trợ chu trình Pomodoro & liên kết dự án `projectId` |
 | `src/services/projectService.js` | **Tạo mới** | Service | Nghiệp vụ dự án, tính tổng thời gian, tiến độ và nhật ký dự án |
-| `src/services/recurrenceService.js` | **Tạo mới** | Service | Tính toán và quản lý các lần xuất hiện theo transaction kép và xử lý `ConstraintError` bằng preventDefault/fallback |
+| `src/services/recurrenceService.js` | **Tạo mới** | Service | Promise Wrapper xử lý `ConstraintError` bằng preventDefault và transaction fallback |
 | `src/services/backupService.js` | Chỉnh sửa | Service | Hỗ trợ đầy đủ 10 Object Stores vào file backup JSON, thẩm định schema sâu và atomic replace |
 | `src/pages/Projects/ProjectsPage.js` | **Tạo mới** | UI | Màn hình quản lý dự án, Project Timeline và Project Journal Entries |
 | `src/pages/Focus/FocusPage.js` | **Tạo mới** | UI | Màn hình Focus Mode & Pomodoro tối giản |
@@ -135,4 +141,4 @@
 | `src/components/Sidebar.js` | Chỉnh sửa | UI | Thêm mục `Projects` và `Focus Mode` |
 | `public/manifest.webmanifest` | **Tạo mới** | PWA | Web App Manifest cấu hình chuẩn GitHub Pages |
 | `public/sw.js` | **Tạo mới** | PWA | Service Worker quản lý offline cache an toàn |
-| `test/test-suite.js` | Chỉnh sửa | Testing | Mở rộng bổ sung 20 kịch bản test migration, provenance, multi-tab và nghiệp vụ V2 |
+| `test/test-suite.js` | Chỉnh sửa | Testing | Mở rộng bổ sung 20 kịch bản test migration, whitelist timer, multi-tab và nghiệp vụ V2 |

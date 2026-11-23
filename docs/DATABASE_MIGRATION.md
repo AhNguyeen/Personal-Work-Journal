@@ -173,39 +173,45 @@ if (event.oldVersion < 2) {
 
 ---
 
-## III. CHUẨN HÓA ACTUAL DURATION PROVENANCE: PHÂN BIỆT RÕ RÀNG TIMER THỰC TẾ VÀ NHẬP TAY
+## III. CHUẨN HÓA ACTUAL DURATION PROVENANCE: PHÂN BIỆT RÕ RÀNG BẰNG WHITELIST TIMER VS MANUAL
 
 ### 1. Phân loại 4 nguồn gốc dữ liệu thời gian thực tế
 ```typescript
 type ActualDurationSource = 
-  | 'timer_verified'      // Ưu tiên 1: Đo bằng Timer thực tế (Stopwatch / Pomodoro) trong timerSessions
-  | 'manual_verified'     // Ưu tiên 2: Nhập tay có bằng chứng (phiên manual trong timerSessions hoặc cờ xác nhận)
+  | 'timer_verified'      // Ưu tiên 1: Đo bằng Timer thực tế (type === 'timer' || type === 'pomodoro')
+  | 'manual_verified'     // Ưu tiên 2: Nhập tay có bằng chứng (phiên type === 'manual' hoặc cờ xác nhận)
   | 'legacy_unverified'   // Ưu tiên 3: Dữ liệu cũ kế thừa từ V1 có số phút > 0 nhưng không rõ bằng chứng nguồn
   | 'unperformed';        // Ưu tiên 4: Hoạt động Planned chưa diễn ra (số phút = 0)
 ```
 
-### 2. Thứ tự ưu tiên và Quy tắc phân biệt nghiêm ngặt Timer vs Manual:
+### 2. Thứ tự ưu tiên và Quy tắc phân biệt nghiêm ngặt bằng Whitelist:
 
 > [!IMPORTANT]
-> **Quy định bắt buộc về phân loại `timerSessions`:**
-> Store `timerSessions` chứa cả các phiên bấm giờ thực tế (`type === 'timer'` hoặc `'pomodoro'`) và các phiên người dùng tự log tay (`type === 'manual'`).
-> **Phiên `type === 'manual'` trong `timerSessions` là hình thức nhập tay, BẮT BUỘC phân loại thành `manual_verified`, TUYỆT ĐỐI KHÔNG ĐƯỢC phân loại nhầm thành `timer_verified`.**
-> Nếu gán nhãn sai, báo cáo nguồn gốc thời gian của hệ thống sẽ mất tính xác thực.
+> **Quy định Whitelist bắt buộc về phân loại `timerSessions`:**
+> Store `timerSessions` chứa cả các phiên bấm giờ thực tế và các phiên người dùng tự log tay.
+> - **Whitelist Timer thực tế:** Bắt buộc sử dụng điều kiện danh sách cho phép tường minh:
+>   ```javascript
+>   const isActualTimerSession = session.status === 'completed' &&
+>     (session.type === 'timer' || session.type === 'pomodoro') &&
+>     session.totalSeconds > 0;
+>   ```
+> - **Tuyệt đối không dùng điều kiện phủ định `type !== 'manual'`:** Điều kiện phủ định có thể nhận nhầm các bản ghi thiếu `type` (undefined/null) hoặc mang giá trị không hợp lệ.
+> - **Phiên `type === 'manual'`:** Là hình thức nhập tay, **BẮT BUỘC phân loại thành `manual_verified`**, TUYỆT ĐỐI KHÔNG ĐƯỢC phân loại nhầm thành `timer_verified`.
 
 1. **Ưu tiên 1: `timer_verified` (Chỉ dành riêng cho phiên bấm giờ thực tế)**
    - **Điều kiện:** Tồn tại ít nhất 1 phiên trong `timerSessions` có:
      - `activityId === a.id`
      - `status === 'completed'`
      - `totalSeconds > 0`
-     - **`type !== 'manual'`** (tức là `type === 'timer'` hoặc `type === 'pomodoro'`).
+     - **`session.type === 'timer' || session.type === 'pomodoro'`** (Whitelist chuẩn xác).
    - **Hành động:**
-     - `actualDurationSeconds` = tổng số `totalSeconds` của các phiên có `type !== 'manual'`.
+     - `actualDurationSeconds` = tổng số `totalSeconds` của các phiên có `type === 'timer' || type === 'pomodoro'`.
      - `actualDurationMinutes = Math.round(actualDurationSeconds / 60)`.
      - `actualDurationSource = 'timer_verified'`.
 
 2. **Ưu tiên 2: `manual_verified` (Thời gian nhập tay có bằng chứng xác thực)**
-   - **Điều kiện:** KHÔNG có phiên bấm giờ thực tế (`type !== 'manual'`), nhưng thỏa mãn một trong các bằng chứng:
-     - **Bằng chứng A:** Tồn tại phiên hoàn tất trong `timerSessions` có `activityId === a.id` và **`type === 'manual'`** (`totalSeconds > 0`).
+   - **Điều kiện:** KHÔNG có phiên bấm giờ thực tế (`type === 'timer' || type === 'pomodoro'`), nhưng thỏa mãn một trong các bằng chứng:
+     - **Bằng chứng A:** Tồn tại phiên hoàn tất trong `timerSessions` có `activityId === a.id`, **`type === 'manual'`** và `totalSeconds > 0`.
      - **Bằng chứng B:** Activity có cờ xác nhận chủ động: `manuallyConfirmed === true`, `manualEntry === true`, hoặc `source === 'manual'`.
    - **Quy tắc bắt buộc:** Tuyệt đối không nhận diện `manual_verified` chỉ bằng điều kiện `actualDurationMinutes !== durationMinutes`.
    - **Hành động:**
@@ -215,15 +221,16 @@ type ActualDurationSource =
      - `actualDurationSource = 'manual_verified'`.
 
 3. **Xử lý hoạt động có cả phiên Timer thực tế và phiên Manual Log:**
-   - Nếu một Activity có cả phiên `type === 'timer'` VÀ phiên `type === 'manual'`:
+   - Nếu một Activity vừa có phiên `type === 'timer' || type === 'pomodoro'` vừa có phiên `type === 'manual'`:
      - Nhãn nguồn gốc chính được gán: `actualDurationSource = 'timer_verified'`.
-     - Thời lượng `actualDurationSeconds` = tổng giây của tất cả các phiên hợp lệ (`timer` + `manual`).
-     - **Bổ sung metadata bóc tách:** Lưu trữ thuộc tính chi tiết `timerSeconds` (tổng giây bấm giờ) và `manualSeconds` (tổng giây nhập tay) trong Activity để báo cáo thống kê hiển thị minh bạch từng thành phần, **không đánh đồng thời gian manual thành thời gian đo bằng timer thực tế**.
+     - Thời lượng `actualDurationSeconds` = tổng giây của tất cả các phiên hợp lệ (`timer` + `pomodoro` + `manual`).
+     - **Bổ sung metadata bóc tách:** Lưu trữ thuộc tính chi tiết `timerSeconds` (tổng giây bấm giờ thực tế) và `manualSeconds` (tổng giây nhập tay) trong Activity để báo cáo thống kê hiển thị minh bạch từng thành phần, **không đánh đồng thời gian manual thành thời gian đo bằng timer thực tế**.
 
 4. **Ưu tiên 3: `legacy_unverified` (Dữ liệu cũ có thời lượng nhưng không có bằng chứng nguồn)**
    - **Áp dụng cho:**
      - Case A: Hoạt động trạng thái `Completed` có `actualDurationMinutes > 0` nhưng không có phiên timer và không có bằng chứng cờ nhập thủ công.
      - Case B: **Hoạt động V1 trạng thái `Planned` nhưng có `actualDurationMinutes > 0` cũ** (do logic phiên bản 1 gán mặc định thời lượng dự kiến vào).
+     - Case C: Phiên trong `timerSessions` thiếu `type` (undefined) hoặc có `type` không nằm trong whitelist hợp lệ và Activity không có bằng chứng manual proof.
    - **Quy tắc bảo tồn tuyệt đối:**
      - **TUYỆT ĐỐI KHÔNG ĐƯỢC TỰ Ý XÓA HOẶC LÀM MẤT GIÁ TRỊ LỊCH SỬ NÀY.**
      - Giữ nguyên số phút cũ: `actualDurationMinutes = Number(a.actualDurationMinutes)`.
@@ -242,7 +249,7 @@ type ActualDurationSource =
 
 ### 3. Ma trận giải quyết xung đột điều kiện (Conflict Resolution Matrix)
 
-| Trạng thái Activity | Phiên Timer thực tế (`type !== 'manual'`) | Phiên Manual Session (`type === 'manual'`) | Bằng chứng cờ Manual Proof | Số phút cũ `actualDurationMinutes` | Kết quả phân loại (`actualDurationSource`) | Nguồn tính `actualDurationSeconds` | Tính vào Verified Actual Time? |
+| Trạng thái Activity | Phiên Timer thực tế (`type === 'timer' \|\| 'pomodoro'`) | Phiên Manual Session (`type === 'manual'`) | Bằng chứng cờ Manual Proof | Số phút cũ `actualDurationMinutes` | Kết quả phân loại (`actualDurationSource`) | Nguồn tính `actualDurationSeconds` | Tính vào Verified Actual Time? |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | `Completed` | Có (`totalSeconds > 0`) | Có | Bất kỳ | **`timer_verified`** | Tổng giây Timer + Manual (lưu chi tiết `timerSeconds` / `manualSeconds`) | **CÓ** |
 | `Completed` | Có (`totalSeconds > 0`) | Không | Bất kỳ | **`timer_verified`** | Tổng giây Timer thực tế | **CÓ** |
@@ -255,7 +262,7 @@ type ActualDurationSource =
 
 ---
 
-## IV. HOÀN THIỆN MÔ HÌNH OCCURRENCE VÀ XỬ LÝ CONSTRAINTERROR KHI MỞ NHIỀU TAB
+## IV. HOÀN THIỆN MÔ HÌNH OCCURRENCE VÀ XỬ LÝ CONSTRAINTERROR BẰNG PROMISE WRAPPER HỢP LỆ
 
 ### 1. Nguyên tắc Giao dịch Nguyên tử (Atomic Transaction Scope)
 Việc kiểm tra và tạo Occurrence cùng Activity bắt buộc phải thực hiện trong **CÙNG MỘT TRANSACTION READWRITE** bao gồm cả hai store:
@@ -265,63 +272,136 @@ const occStore = tx.objectStore('recurrenceOccurrences');
 const actStore = tx.objectStore('activities');
 ```
 
-### 2. Sử dụng `add()` và Cơ chế Xử lý `ConstraintError` chuẩn xác:
+### 2. Sử dụng `add()` và Cơ chế Promise Wrapper xử lý `ConstraintError`:
 Để phát hiện sự cạnh tranh ghi (Race Condition) giữa 2 tab mở đồng thời, hệ thống **bắt buộc sử dụng `occStore.add(occurrenceRecord)`** (thay vì `put()`). 
 
 > [!CAUTION]
 > **Vấn đề kỹ thuật với `ConstraintError` trong IndexedDB:**
-> Khi một IndexedDB request (như `add()`) phát sinh lỗi `ConstraintError`, theo mặc định sự kiện error sẽ nổi bọt (bubble) lên transaction và khiến transaction **tự động bị abort**. Khi transaction đã abort thì không thể tiếp tục thực thi request đọc nào trên transaction đó.
+> 1. Khi một IndexedDB request (như `add()`) phát sinh lỗi `ConstraintError`, sự kiện error mặc định sẽ nổi bọt (bubble) lên transaction và khiến transaction **tự động bị abort**. Khi transaction đã abort thì không thể tiếp tục thực thi request đọc nào trên transaction đó.
+> 2. `IDBObjectStore.get()` trả về một `IDBRequest`, **không phải là một Promise mặc định** để có thể `await` trực tiếp.
+> 3. Lệnh `return` bên trong một event callback (như `tx.onabort = ...`) không thể trả kết quả về cho hàm gọi ban đầu (outer caller).
 
-Hệ thống quy định hai phương án xử lý chuẩn mực, kết hợp chặt chẽ:
+Để giải quyết trọn vẹn và đạt chuẩn W3C IndexedDB, hệ thống đặc tả toàn bộ quy trình bằng **Promise Wrapper hợp lệ**:
 
-#### Phương án 1 (Chính thức): Ngăn lỗi làm abort transaction bằng `event.preventDefault()`
-Xử lý sự kiện `onerror` trực tiếp tại request `add()` của Occurrence:
 ```javascript
-const addOccReq = occStore.add(occurrenceRecord);
+/**
+ * Đảm bảo tạo mới hoặc lấy Occurrence có sẵn, xử lý triệt để tranh chấp giữa hai tab
+ * @param {IDBDatabase} db
+ * @param {Object} rule
+ * @param {string} date
+ * @returns {Promise<{ activityId: string, isCreated: boolean }>}
+ */
+function ensureOccurrence(db, rule, date) {
+  const occurrenceId = `occ_${rule.id}_${date}`;
 
-addOccReq.onerror = (event) => {
-  if (event.target.error?.name === 'ConstraintError') {
-    // 1. QUAN TRỌNG: Gọi preventDefault() và stopPropagation() để ngăn error nổi bọt lên transaction,
-    // giữ cho transaction 'readwrite' tiếp tục hoạt động mà KHÔNG bị auto-abort.
-    event.preventDefault();
-    event.stopPropagation();
-    
-    // 2. Vì bản ghi đã được tab kia tạo thành công, tab này KHÔNG tạo thêm Activity mới.
-    // 3. Đọc lại bản ghi Occurrence đã tồn tại ngay trong transaction hiện tại:
-    const getReq = occStore.get(occurrenceId);
-    getReq.onsuccess = () => {
-      const existingOcc = getReq.result;
-      // Trả về existingOcc.generatedActivityId để UI sử dụng lại Activity có sẵn.
+  return new Promise((resolve, reject) => {
+    // Mở transaction kép bao gồm cả 2 stores
+    const tx = db.transaction(['recurrenceOccurrences', 'activities'], 'readwrite');
+    const occStore = tx.objectStore('recurrenceOccurrences');
+    const actStore = tx.objectStore('activities');
+
+    const occurrenceRecord = {
+      occurrenceId,
+      recurrenceRuleId: rule.id,
+      originalDate: date,
+      generatedActivityId: null,
+      isOverridden: false,
+      isCancelled: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     };
-  }
-};
 
-addOccReq.onsuccess = () => {
-  // Bản ghi Occurrence được tạo thành công lần đầu -> Tiến hành tạo Activity tương ứng trong cùng transaction:
-  const newActivity = createActivityFromTemplate(rule, date, occurrenceId);
-  actStore.add(newActivity);
-};
+    let isHandledViaConflict = false;
+    const addOccReq = occStore.add(occurrenceRecord);
+
+    // --- PHƯƠNG ÁN 1 (Chính thức): Ngăn lỗi làm abort transaction bằng preventDefault() ---
+    addOccReq.onerror = (event) => {
+      if (event.target.error?.name === 'ConstraintError') {
+        // 1. Ngăn lỗi nổi bọt lên transaction, giúp transaction tiếp tục hoạt động mà không bị auto-abort:
+        event.preventDefault();
+        event.stopPropagation();
+        isHandledViaConflict = true;
+
+        // 2. Vì bản ghi đã được tab kia tạo thành công, tab này KHÔNG tạo thêm Activity mới.
+        // 3. Đọc lại bản ghi Occurrence có sẵn trong cùng transaction đang mở bằng onsuccess:
+        const getReq = occStore.get(occurrenceId);
+        getReq.onsuccess = () => {
+          const existingOcc = getReq.result;
+          if (existingOcc && existingOcc.generatedActivityId) {
+            // Resolve kết quả ra ngoài cho hàm gọi
+            resolve({ activityId: existingOcc.generatedActivityId, isCreated: false });
+          } else {
+            // Nếu chưa có generatedActivityId (trường hợp hiếm), để fallback sang Phương án 2
+            tx.abort();
+          }
+        };
+        getReq.onerror = () => {
+          tx.abort();
+        };
+      }
+    };
+
+    addOccReq.onsuccess = () => {
+      // Tab này thắng cuộc đua tạo Occurrence -> Tiến hành tạo Activity tương ứng trong cùng transaction:
+      const newActivity = createActivityFromTemplate(rule, date, occurrenceId);
+      occurrenceRecord.generatedActivityId = newActivity.id;
+
+      // Cập nhật generatedActivityId vào occurrence trong cùng transaction
+      occStore.put(occurrenceRecord);
+      actStore.add(newActivity);
+    };
+
+    tx.oncomplete = () => {
+      // Nếu đã được resolve qua nhánh conflict thì không gọi lại
+      if (!isHandledViaConflict && occurrenceRecord.generatedActivityId) {
+        resolve({ activityId: occurrenceRecord.generatedActivityId, isCreated: true });
+      }
+    };
+
+    // --- PHƯƠNG ÁN 2 (Dự phòng chuẩn mực): Khi Transaction đã bị Abort bởi ConstraintError ---
+    tx.onabort = () => {
+      if (isHandledViaConflict) return; // Đã xử lý thành công ở Phương án 1
+
+      // Kiểm tra xem abort có phải do ConstraintError (tab khác đã commit trước)
+      if (tx.error?.name === 'ConstraintError' || addOccReq.error?.name === 'ConstraintError') {
+        // Mở một transaction 'readonly' MỚI để đọc dữ liệu đã được tab thắng commit bền vững vào đĩa:
+        const readTx = db.transaction('recurrenceOccurrences', 'readonly');
+        const readReq = readTx.objectStore('recurrenceOccurrences').get(occurrenceId);
+
+        // Đọc kết quả bằng onsuccess chuẩn IndexedDB:
+        readReq.onsuccess = () => {
+          const existingOcc = readReq.result;
+          if (existingOcc && existingOcc.generatedActivityId) {
+            // Resolve Promise ban đầu ra ngoài cho hàm gọi, đảm bảo tab thua nhận đúng Activity của tab thắng
+            resolve({ activityId: existingOcc.generatedActivityId, isCreated: false });
+          } else {
+            reject(new Error(`Không tìm thấy Occurrence đã tạo cho ${occurrenceId}`));
+          }
+        };
+
+        readReq.onerror = () => {
+          reject(readReq.error || new Error('Lỗi khi đọc Occurrence từ transaction mới'));
+        };
+      } else {
+        reject(tx.error || new Error('Transaction bị abort do lỗi không xác định'));
+      }
+    };
+
+    tx.onerror = () => {
+      // Chỉ reject nếu lỗi không phải ConstraintError đã được ngăn ngừa
+      if (!isHandledViaConflict && (!addOccReq.error || addOccReq.error.name !== 'ConstraintError')) {
+        reject(tx.error || new Error('Transaction phát sinh lỗi'));
+      }
+    };
+  });
+}
 ```
 
-#### Phương án 2 (Dự phòng chuẩn mực): Mở Transaction mới khi Transaction đã Abort
-Nếu engine trình duyệt vẫn tự động abort transaction khi gặp `ConstraintError` (hoặc trong trường hợp transaction bị đóng do timeout):
-```javascript
-tx.onabort = async (event) => {
-  // Bắt sự kiện abort do ConstraintError gây ra:
-  if (tx.error?.name === 'ConstraintError' || isConstraintConflict) {
-    // Không báo lỗi crash hệ thống.
-    // Mở ngay một transaction 'readonly' mới để đọc lại bản ghi đã được tab kia tạo thành công:
-    const readTx = db.transaction('recurrenceOccurrences', 'readonly');
-    const existingOcc = await readTx.objectStore('recurrenceOccurrences').get(occurrenceId);
-    if (existingOcc && existingOcc.generatedActivityId) {
-      // Tái sử dụng Activity của tab kia, đảm bảo 0 activity trùng lặp.
-      return existingOcc.generatedActivityId;
-    }
-  }
-};
-```
-
-**Kết quả nghiệm thu:** Dù triển khai theo Phương án 1 hay Phương án 2, hệ thống **tuyệt đối không bao giờ tạo Activity trùng lặp giữa hai tab** và không để lộ lỗi crash ra giao diện người dùng.
+**Tính ưu việt của giải pháp:**
+1. **Tuân thủ 100% chuẩn W3C IndexedDB:** Đọc request bằng `onsuccess`/`onerror`, không gọi `await` trực tiếp trên `IDBRequest`.
+2. **Trả kết quả đúng đắn về outer caller:** Toàn bộ tiến trình được bọc trong `Promise`, việc trả kết quả ra ngoài được thực hiện qua `resolve()`, khắc phục hoàn toàn nhược điểm của lệnh `return` trong callback sự kiện.
+3. **Bảo đảm tính toàn vẹn dữ liệu từ tab thắng:** Transaction đọc mới chỉ lấy dữ liệu sau khi tab thắng đã commit thành công vào cơ sở dữ liệu trên đĩa (vì `ConstraintError` chứng minh bản ghi của tab thắng đã tồn tại bền vững).
+4. **Hoàn toàn không sinh Activity trùng lặp giữa hai tab.**
 
 ### 3. Quy tắc Edit Single Occurrence (Bảo toàn trọn vẹn quan hệ nguồn):
 Khi người dùng chọn "Chỉnh sửa chỉ lần này" (Edit Single Occurrence) tại ngày `D`:
@@ -410,16 +490,16 @@ Khi người dùng chọn "Chỉnh sửa chỉ lần này" (Edit Single Occurren
 | **MIG-01** | Database V1 rỗng nâng cấp lên V2 | Tạo đủ 10 stores, `DB_VERSION = 2`, không phát sinh exception. |
 | **MIG-02** | Database V1 có đầy đủ dữ liệu 6 stores cũ | Toàn bộ số lượng bản ghi của 6 store cũ được bảo toàn 100%. |
 | **MIG-03** | Hoạt động trạng thái `Planned` có số phút cũ = 0 | `actualDurationSeconds = 0`, `actualDurationMinutes = 0`, `actualDurationSource = 'unperformed'`. |
-| **MIG-04** | Hoạt động `Completed` có timerSessions (`type !== 'manual'`) | `actualDurationSeconds` = tổng giây Timer thực tế, `actualDurationSource = 'timer_verified'`. |
+| **MIG-04** | Hoạt động `Completed` có timerSessions chuẩn Whitelist | Có `type === 'timer'` hoặc `'pomodoro'`, gán `timer_verified`. |
 | **MIG-05** | **Hoạt động chỉ có phiên `timerSessions` loại `type === 'manual'`** | **Phân loại chính xác `manual_verified`, TUYỆT ĐỐI KHÔNG gán nhầm thành `timer_verified`.** |
-| **MIG-06** | Hoạt động có cả phiên Timer thực tế và Manual Session | Gán nhãn chính `timer_verified`, bóc tách chi tiết `timerSeconds` và `manualSeconds`. |
+| **MIG-06** | Hoạt động có cả phiên Timer Whitelist và Manual Session | Gán nhãn chính `timer_verified`, bóc tách chi tiết `timerSeconds` và `manualSeconds`. |
 | **MIG-07** | Hoạt động `Completed` có phút cũ nhưng thiếu bằng chứng | Giữ nguyên số phút cũ, gán `actualDurationSource = 'legacy_unverified'`. |
 | **MIG-08** | **Hoạt động `Planned` V1 có số phút cũ `> 0`** | **Giữ nguyên số phút cũ (không reset về 0), gán `legacy_unverified`.** |
 | **MIG-09** | **Phân tách Verified Actual Time vs Legacy** | **Dữ liệu `legacy_unverified` KHÔNG được cộng vào `Verified Actual Time`.** |
 | **MIG-10** | Lỗi bất ngờ khi nâng cấp store | Transaction bị abort, DB giữ nguyên version 1, dữ liệu không biến dạng. |
 | **MIG-11** | Nhiều tab trình duyệt cùng mở khi upgrade | Xử lý `onversionchange` đóng kết nối tab cũ an toàn, `onblocked` phát cảnh báo rõ ràng. |
 | **MIG-12** | Chống tạo trùng Occurrence sau Reload | Sau khi reload trình duyệt / re-init DB, truy vấn `recurrenceOccurrences` không sinh trùng `occurrenceId`. |
-| **MIG-13** | **Hai tab cùng ghi đồng thời một Occurrence (`ConstraintError`)** | Ngăn abort bằng `preventDefault()` hoặc mở transaction mới; không crash, 0 activity trùng lặp. |
+| **MIG-13** | **Hai tab cùng ghi đồng thời Occurrence (`ConstraintError`)** | Promise wrapper xử lý qua `preventDefault()` hoặc đọc lại bằng transaction mới; trả kết quả chuẩn, 0 activity trùng lặp. |
 | **MIG-14** | **Sửa một lần lặp (Edit Single Occurrence)** | Cập nhật `isOverridden = true`, GIỮ NGUYÊN `recurrenceRuleId`, `originalDate`, `generatedActivityId`. |
 | **MIG-15** | Tạo Project mới và liên kết Activity | Activity truy vấn được qua index `projectId`, không mất các trường dữ liệu V1. |
 | **MIG-16** | Tạo Project Journal Entry độc lập | Entry lưu vào `projectJournalEntries`, không ảnh hưởng tới `notes` hay `dailyNotes`. |

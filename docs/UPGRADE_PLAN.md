@@ -34,9 +34,13 @@
   - `src/database/repositories/recurrenceOccurrenceRepository.js`
   - `src/database/repositories/projectJournalRepository.js`
 
-### 3. Chuẩn hóa Nguồn gốc Thời gian Thực tế: Phân biệt rõ Timer vs Nhập tay
+### 3. Chuẩn hóa Nguồn gốc Thời gian Thực tế: Whitelist Timer vs Nhập tay
 - **Thứ tự ưu tiên đối soát (Strict Priority Order):**
-  1. `timer_verified`: Có phiên bấm giờ thực tế trong `timerSessions` với **`type !== 'manual'`** (đo bằng Stopwatch/Pomodoro thực tế).
+  1. `timer_verified`: Có phiên bấm giờ thực tế trong `timerSessions` thỏa mãn **Whitelist rõ ràng**:
+     ```javascript
+     session.status === 'completed' && (session.type === 'timer' || session.type === 'pomodoro') && session.totalSeconds > 0
+     ```
+     **Tuyệt đối không dùng phủ định `type !== 'manual'`** để tránh nhận nhầm các bản ghi thiếu `type` hoặc có giá trị rác.
   2. `manual_verified`:
      - Có phiên hoàn tất trong `timerSessions` thuộc loại **`type === 'manual'`** (người dùng tự log tay). **Quy tắc bắt buộc: Phiên `manual` trong `timerSessions` tuyệt đối không được phân loại nhầm thành `timer_verified`.**
      - Hoặc có cờ xác nhận chủ động: `manuallyConfirmed === true`, `manualEntry === true`, `source === 'manual'`.
@@ -67,15 +71,16 @@
 
 ## GIAI ĐOẠN 2: ADVANCED TIME MANAGEMENT (QUẢN LÝ THỜI GIAN NÂNG CAO)
 
-### 1. Recurring Schedule & Xử lý `ConstraintError` khi mở nhiều tab
+### 1. Recurring Schedule & Xử lý `ConstraintError` bằng Promise Wrapper hợp lệ
 - **Giao dịch nguyên tử kép (Double-Store Transaction):**
   - Việc kiểm tra và tạo Occurrence cùng Activity bắt buộc thực hiện trong cùng một transaction `readwrite` bao gồm cả `recurrenceOccurrences` và `activities`.
-- **Cơ chế Xử lý `ConstraintError` tránh Abort Transaction:**
+- **Cơ chế Xử lý `ConstraintError` bằng Promise Wrapper chuẩn mực:**
   - Sử dụng `occStore.add()` để tạo mới bản ghi lần lặp.
   - Khi hai tab cùng mở Timeline cho cùng một ngày, tab thứ hai sẽ phát sinh `ConstraintError`.
-  - **Giải pháp chính thức:** Bắt sự kiện `onerror` tại request `add()`, gọi `event.preventDefault()` và `event.stopPropagation()` để ngăn lỗi nổi bọt làm abort transaction, sau đó đọc lại bản ghi qua `occStore.get(occurrenceId)` ngay trong transaction đó.
-  - **Giải pháp dự phòng:** Nếu transaction đã bị abort, bắt `tx.onabort` và mở một transaction `readonly` mới để đọc lại bản ghi đã được tab thứ nhất tạo thành công.
-  - Tái sử dụng `generatedActivityId` từ Occurrence có sẵn, hoàn toàn loại bỏ nguy cơ tạo trùng lặp Activity giữa các tab.
+  - **Xử lý bất đồng bộ chuẩn IndexedDB:** Toàn bộ logic được bao bọc trong một `Promise`, sử dụng callback `onsuccess`/`onerror` trên `IDBRequest` thay vì gọi `await` trực tiếp trên `store.get()`:
+    - **Phương án 1 (Chính thức):** Bắt sự kiện `onerror` tại request `add()`, gọi `event.preventDefault()` và `event.stopPropagation()` để ngăn lỗi nổi bọt làm abort transaction, sau đó đọc lại bản ghi qua `occStore.get(occurrenceId)` qua callback `onsuccess` ngay trong transaction đó và gọi `resolve()` trả về `generatedActivityId`.
+    - **Phương án 2 (Dự phòng chuẩn mực):** Nếu transaction đã bị abort, bắt `tx.onabort`, mở transaction `readonly` MỚI, đọc lại bản ghi bằng `readReq.onsuccess`, và gọi `resolve()` trả về `generatedActivityId` đã được tab thắng commit bền vững vào cơ sở dữ liệu trên đĩa.
+  - Khắc phục hoàn toàn việc `return` bị nuốt trong callback sự kiện và đảm bảo **tuyệt đối không tạo Activity trùng lặp giữa các tab**.
 - **Quy tắc Edit Single Occurrence (Bảo toàn quan hệ nguồn):**
   - Khi người dùng chỉnh sửa riêng một lần lặp:
     - Activity tương ứng cập nhật thông tin riêng.
@@ -150,16 +155,16 @@
   1. Migration từ Database V1 rỗng lên V2 (đủ 10 stores).
   2. Migration từ Database V1 có đầy đủ 6 stores cũ (bảo toàn 100% record count).
   3. Hoạt động trạng thái `Planned` có số phút cũ = 0 (`actualDurationSeconds = 0`, `unperformed`).
-  4. Hoạt động `Completed` có timerSessions thực tế (`type !== 'manual'`, gán `timer_verified`).
+  4. Hoạt động `Completed` có timerSessions Whitelist (`type === 'timer' || type === 'pomodoro'`, gán `timer_verified`).
   5. Hoạt động chỉ có phiên `timerSessions` loại `type === 'manual'` (phân loại chính xác `manual_verified`, không nhầm thành `timer_verified`).
-  6. Hoạt động có cả phiên Timer thực tế và Manual Session (gán nhãn chính `timer_verified`, bóc tách `timerSeconds` và `manualSeconds`).
+  6. Hoạt động có cả phiên Timer Whitelist và Manual Session (gán nhãn chính `timer_verified`, bóc tách `timerSeconds` và `manualSeconds`).
   7. Hoạt động `Completed` có phút cũ nhưng thiếu bằng chứng (`legacy_unverified`).
   8. Hoạt động `Planned` V1 có số phút cũ `> 0` (giữ nguyên số phút cũ, gán `legacy_unverified`).
   9. Phân tách `Verified Actual Time` vs `Unverified Legacy Time`.
   10. Xử lý lỗi rollback trong quá trình nâng cấp store.
   11. Xử lý sự kiện `onversionchange` và `onblocked` khi mở nhiều tab.
   12. Chống tạo trùng Occurrence sau Reload trang (IndexedDB persistence).
-  13. Hai tab cùng ghi đồng thời một Occurrence (xử lý `ConstraintError` bằng `preventDefault()` hoặc mở transaction mới, 0 activity trùng lặp).
+  13. Hai tab cùng ghi đồng thời Occurrence (`ConstraintError`): Promise wrapper xử lý qua `preventDefault()` hoặc đọc lại bằng transaction mới; trả kết quả chuẩn về caller, 0 activity trùng lặp.
   14. Sửa một lần lặp (Edit Single Occurrence) giữ nguyên `recurrenceRuleId`, `originalDate`, `generatedActivityId`.
   15. Tạo Project và liên kết Activity qua index `projectId`.
   16. Tạo Project Journal Entry độc lập trong `projectJournalEntries`.
