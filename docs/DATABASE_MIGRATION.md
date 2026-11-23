@@ -1,7 +1,8 @@
 # 🗄️ DATABASE MIGRATION SPECIFICATION: V1 ➔ V2
 > **Chi tiết thiết kế di chuyển cơ sở dữ liệu IndexedDB, phân loại dữ liệu thực tế và đảm bảo toàn vẹn**  
 > **Cơ sở dữ liệu:** `PersonalWorkJournalDB`  
-> **Phiên bản cũ:** `1` ➔ **Phiên bản mới:** `2`
+> **Phiên bản cũ:** `1` ➔ **Phiên bản mới:** `2`  
+> **Nhánh quy chuẩn:** `master`
 
 ---
 
@@ -87,11 +88,11 @@ interface RecurrenceRule {
 ```
 
 ### 3. Store mới: `recurrenceOccurrences` (Lưu trữ bền vững & Chống tạo trùng)
-Nhằm đảm bảo cơ chế chống tạo trùng có tính bền vững tuyệt đối sau khi reload trang và khi người dùng mở nhiều tab cùng lúc, hệ thống quản lý các lần xuất hiện bằng Object Store độc lập lưu trên ổ đĩa thay vì chỉ lưu tạm trong bộ nhớ:
+> [!NOTE]
+> **Tối ưu hóa Index:** Store được cấu hình với `{ keyPath: 'occurrenceId' }`. Vì `occurrenceId` đã là khóa chính nên mặc định đã có ràng buộc duy nhất (Unique Constraint) ở cấp engine IndexedDB. Do đó, **không tạo thêm index `occurrenceId`** nhằm tránh dư thừa chỉ mục và tiết kiệm tài nguyên.
 ```javascript
 if (!db.objectStoreNames.contains('recurrenceOccurrences')) {
   const occStore = db.createObjectStore('recurrenceOccurrences', { keyPath: 'occurrenceId' });
-  occStore.createIndex('occurrenceId', 'occurrenceId', { unique: true });
   occStore.createIndex('recurrenceRuleId', 'recurrenceRuleId', { unique: false });
   occStore.createIndex('originalDate', 'originalDate', { unique: false });
   occStore.createIndex('generatedActivityId', 'generatedActivityId', { unique: false });
@@ -103,8 +104,8 @@ if (!db.objectStoreNames.contains('recurrenceOccurrences')) {
 **Mô hình dữ liệu:**
 ```typescript
 interface RecurrenceOccurrence {
-  occurrenceId: string;         // 'occ_${recurrenceRuleId}_${originalDate}' (Định danh tất định - Primary Key)
-  recurrenceRuleId: string;     // Liên kết với recurrenceRules.id (luôn bảo toàn quan hệ nguồn)
+  occurrenceId: string;         // 'occ_${recurrenceRuleId}_${originalDate}' (Khóa chính keyPath duy nhất)
+  recurrenceRuleId: string;     // Liên kết với recurrenceRules.id (luôn duy trì quan hệ nguồn)
   originalDate: string;         // 'YYYY-MM-DD' (Ngày lịch dự kiến ban đầu)
   generatedActivityId?: string; // ID của activity tương ứng trong store activities
   isOverridden: boolean;        // true nếu lần này được sửa riêng biệt
@@ -174,75 +175,130 @@ if (event.oldVersion < 2) {
 
 ## III. CHUẨN HÓA ACTUAL DURATION PROVENANCE & BẢO TOÀN DỮ LIỆU CŨ
 
-### 1. Phân loại nguồn gốc dữ liệu thực tế (Data Provenance)
-Tuyệt đối không được mặc định một Activity có trạng thái `Completed` hay điều kiện `actualDurationMinutes !== durationMinutes` là đồng nghĩa với việc dữ liệu đã được xác minh thực tế. Dữ liệu thời gian được phân loại thành 4 nguồn gốc tường minh:
-
+### 1. Phân loại 4 nguồn gốc dữ liệu thời gian thực tế
 ```typescript
 type ActualDurationSource = 
-  | 'timer_verified'      // Có phiên bấm giờ thực tế trong timerSessions
-  | 'manual_verified'     // Có bằng chứng người dùng chủ động nhập hoặc xác nhận thủ công
-  | 'legacy_unverified'   // Dữ liệu cũ kế thừa từ V1 không có bằng chứng nguồn
-  | 'unperformed';        // Hoạt động chưa diễn ra (Planned), thời gian thực tế = 0
+  | 'timer_verified'      // Ưu tiên 1: Có phiên bấm giờ thực tế trong timerSessions
+  | 'manual_verified'     // Ưu tiên 2: Có bằng chứng người dùng chủ động nhập hoặc xác nhận thủ công
+  | 'legacy_unverified'   // Ưu tiên 3: Dữ liệu cũ kế thừa từ V1 có số phút > 0 nhưng không rõ bằng chứng nguồn
+  | 'unperformed';        // Ưu tiên 4: Hoạt động Planned chưa diễn ra (số phút = 0)
 ```
 
-### 2. Tiêu chí xác định nguồn gốc nghiêm ngặt (Strict Provenance Rules):
+### 2. Thứ tự ưu tiên và Quy tắc đối soát chi tiết (Strict Priority Order):
 
-1. **`timer_verified` (Ưu tiên cao nhất):**
-   - Tồn tại ít nhất 1 bản ghi trong `timerSessions` có `activityId === a.id` và `status === 'completed'` với `totalSeconds > 0`.
-   - `actualDurationSeconds` = tổng số `totalSeconds` của các phiên hoàn tất.
-   - `actualDurationMinutes = Math.round(actualDurationSeconds / 60)`.
-   - `actualDurationSource = 'timer_verified'`.
+1. **Ưu tiên 1: `timer_verified` (Nguồn có độ tin cậy cao nhất)**
+   - **Điều kiện:** Tồn tại ít nhất 1 phiên trong `timerSessions` có `activityId === a.id` và `status === 'completed'` với `totalSeconds > 0`.
+   - **Hành động:**
+     - `actualDurationSeconds` = tổng số `totalSeconds` của tất cả các phiên bấm giờ hoàn tất của activity này.
+     - `actualDurationMinutes = Math.round(actualDurationSeconds / 60)`.
+     - `actualDurationSource = 'timer_verified'`.
+   - **Xử lý chồng lấn:** Nếu hoạt động vừa có Timer Sessions vừa có cờ nhập thủ công, **ưu tiên dữ liệu từ Timer Sessions** và gán nhãn `timer_verified`. Tuyệt đối không cộng dồn hai lần giữa Timer và thủ công.
 
-2. **`manual_verified` (Đòi hỏi bằng chứng người dùng chủ động xác nhận):**
+2. **Ưu tiên 2: `manual_verified` (Đòi hỏi bằng chứng người dùng chủ động xác nhận)**
    - **Quy tắc bắt buộc:** Không được nhận diện `manual_verified` chỉ bằng điều kiện `actualDurationMinutes !== durationMinutes`.
-   - **Bằng chứng hợp lệ:** Bản ghi phải có cờ xác nhận chủ động của người dùng, bao gồm:
+   - **Bằng chứng hợp lệ:** Bản ghi phải có bằng chứng tường minh:
      - Trường `manuallyConfirmed === true`, hoặc
      - Trường `manualEntry === true`, hoặc
      - Trường `source === 'manual'`, hoặc
-     - Có phiên trong `timerSessions` thuộc loại `type === 'manual'` do người dùng tự nhập.
-   - Khi có bằng chứng:
-     - `actualDurationSeconds = a.actualDurationMinutes * 60`.
+     - Có phiên trong `timerSessions` thuộc loại `type === 'manual'` do người dùng tự log tay.
+   - **Hành động:**
+     - `actualDurationSeconds = (Number(a.actualDurationMinutes) || 0) * 60`.
      - `actualDurationSource = 'manual_verified'`.
 
-3. **`legacy_unverified` (Dữ liệu cũ không rõ bằng chứng - Giữ nguyên bảo toàn):**
-   - Nếu bản ghi từ V1 có `actualDurationMinutes` (bất kể bằng hay khác `durationMinutes`) nhưng **KHÔNG** có phiên Timer Session và **KHÔNG** có bằng chứng cờ xác nhận thủ công tường minh:
-     - **Tuyệt đối không xóa hoặc ghi đè số phút cũ.**
-     - Gán `actualDurationSeconds = (Number(a.actualDurationMinutes) || 0) * 60`.
-     - Gán `actualDurationSource = 'legacy_unverified'`.
-     - **Quy tắc tính toán thời gian:** Không để dữ liệu `legacy_unverified` được tính chung vào tổng thời gian thực tế đã xác minh (**Verified Actual Time**).
-     - Trong thống kê: Phân tách rõ thành 2 chỉ số riêng biệt:
-       - `Verified Actual Time` = tổng thời gian của `timer_verified` + `manual_verified`.
-       - `Unverified Legacy Time` = tổng thời gian của `legacy_unverified` (kèm nhãn chú thích dữ liệu ước tính cũ).
+3. **Ưu tiên 3: `legacy_unverified` (Dữ liệu cũ có thời lượng nhưng không có bằng chứng nguồn)**
+   - **Áp dụng cho:**
+     - Case A: Hoạt động trạng thái `Completed` có `actualDurationMinutes > 0` nhưng không có phiên timer và không có bằng chứng cờ nhập thủ công.
+     - Case B: **Hoạt động V1 trạng thái `Planned` nhưng có `actualDurationMinutes > 0` cũ** (do logic phiên bản 1 gán mặc định thời lượng dự kiến vào).
+   - **Quy tắc bảo tồn tuyệt đối:**
+     - **TUYỆT ĐỐI KHÔNG ĐƯỢC TỰ Ý XÓA HOẶC LÀM MẤT GIÁ TRỊ LỊCH SỬ NÀY.**
+     - Giữ nguyên số phút cũ: `actualDurationMinutes = Number(a.actualDurationMinutes)`.
+     - Gán `actualDurationSeconds = actualDurationMinutes * 60`.
+     - Gán nhãn `actualDurationSource = 'legacy_unverified'`.
+   - **Quy tắc tính toán thời gian:**
+     - Dữ liệu `legacy_unverified` **tuyệt đối KHÔNG được tính chung** vào tổng thời gian thực tế đã xác minh (**Verified Actual Time**).
+     - Trong báo cáo thống kê, số liệu này được tách thành chỉ số riêng biệt: "Thời gian ước tính cũ / Chưa xác minh" (Unverified Legacy Time) kèm chú thích giải thích để bảo vệ tính trung thực của báo cáo hiệu suất.
 
-4. **`unperformed` (Hoạt động chưa thực hiện):**
-   - Nếu `a.status === 'Planned'` và không có phiên timer session nào:
-     - Gán `actualDurationSeconds = 0`.
-     - Gán `actualDurationMinutes = 0`.
-     - Gán `actualDurationSource = 'unperformed'`.
+4. **Ưu tiên 4: `unperformed` (Hoạt động chưa diễn ra)**
+   - **Điều kiện:** Activity có trạng thái `status === 'Planned'` VÀ `(Number(a.actualDurationMinutes) || 0) === 0` và không có bất kỳ phiên timer nào.
+   - **Hành động:**
+     - `actualDurationSeconds = 0`.
+     - `actualDurationMinutes = 0`.
+     - `actualDurationSource = 'unperformed'`.
 
-### 3. Tương thích ngược (Backward Compatibility):
-- Trường `actualDurationMinutes` tiếp tục được duy trì song song trong tất cả các bản ghi.
-- Mọi logic cũ đọc `a.actualDurationMinutes` vẫn hoạt động bình thường mà không bị crash. Logic mới sẽ ưu tiên `a.actualDurationSeconds` để đạt độ chính xác cao nhất.
-- Tuyệt đối không cộng trùng thời gian giữa `timerSessions` và thời gian nhập thủ công.
+### 3. Ma trận giải quyết xung đột điều kiện (Conflict Resolution Matrix)
+
+| Trạng thái Activity | Timer Session hợp lệ? | Bằng chứng Manual Proof? | Số phút cũ `actualDurationMinutes` | Kết quả phân loại (`actualDurationSource`) | Giá trị `actualDurationSeconds` | Tính vào Verified Actual Time? |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `Completed` | Có (`totalSeconds > 0`) | Có hoặc Không | Bất kỳ | **`timer_verified`** (Ưu tiên 1) | Tổng `totalSeconds` của Timer | **CÓ** |
+| `Completed` | Không | **Có** | `> 0` | **`manual_verified`** (Ưu tiên 2) | `actualDurationMinutes * 60` | **CÓ** |
+| `Completed` | Không | Không | `> 0` | **`legacy_unverified`** (Ưu tiên 3) | Giữ nguyên: `phút * 60` | **KHÔNG** |
+| `Planned` | Có (`totalSeconds > 0`) | Không quan trọng | Bất kỳ | **`timer_verified`** (Ưu tiên 1) | Tổng `totalSeconds` của Timer | **CÓ** |
+| **`Planned` (V1 cũ)** | **Không** | **Không** | **`> 0` (số phút cũ)** | **`legacy_unverified`** (Ưu tiên 3) | **Giữ nguyên: `phút * 60` (Bảo toàn lịch sử)** | **KHÔNG** |
+| `Planned` | Không | Không | `=== 0` hoặc rỗng | **`unperformed`** (Ưu tiên 4) | `0` | **KHÔNG** |
 
 ---
 
-## IV. CƠ CHẾ GIAO DỊCH ATOMIC CHO BACKUP & RESTORE TRÊN 10 OBJECT STORES
+## IV. HOÀN THIỆN MÔ HÌNH OCCURRENCE VÀ XỬ LÝ ĐA TAB NGUYÊN TỬ
 
-### 1. Phân biệt rõ hai tầng bảo vệ:
-- **Tầng 1 (IndexedDB Engine Transaction Rollback):** Đảm bảo tính nguyên tử (Atomicity) ở cấp độ cơ sở dữ liệu. Toàn bộ thao tác ghi/xóa phải nằm trong cùng một transaction. Nếu có bất kỳ ngoại lệ hoặc lỗi dữ liệu nào phát sinh, IndexedDB engine tự động hoàn tác toàn bộ thay đổi.
-- **Tầng 2 (Application In-Memory Snapshot Backup):** Bản chụp toàn bộ 10 Object Stores được lưu tạm trong bộ nhớ RAM của ứng dụng trước khi bắt đầu transaction, giúp khôi phục tức thời nếu transaction bị ngắt kết nối đột ngột từ phía trình duyệt.
+### 1. Nguyên tắc Giao dịch Nguyên tử (Atomic Transaction Scope)
+Việc kiểm tra và tạo Occurrence cùng Activity bắt buộc phải thực hiện trong **CÙNG MỘT TRANSACTION READWRITE** bao gồm cả hai store:
+```javascript
+const tx = db.transaction(['recurrenceOccurrences', 'activities'], 'readwrite');
+const occStore = tx.objectStore('recurrenceOccurrences');
+const actStore = tx.objectStore('activities');
+```
 
-### 2. Quy trình Replace chuẩn mực trong 1 Transaction duy nhất:
+### 2. Sử dụng `add()` và Cơ chế Xử lý `ConstraintError` khi mở nhiều Tab:
+- **Không dùng `put()`:** Phương thức `put()` sẽ âm thầm ghi đè nếu khóa đã tồn tại. Để phát hiện sự cạnh tranh ghi (Race Condition) giữa 2 tab mở đồng thời, hệ thống **bắt buộc sử dụng `occStore.add(occurrenceRecord)`**.
+- **Quy trình xử lý ngoại lệ `ConstraintError`:**
+  1. Tab A và Tab B cùng mở Timeline cho ngày `D` của quy tắc `rec_123` (`occurrenceId = 'occ_rec_123_2026-11-25'`).
+  2. Tab A gọi `occStore.add(...)` thành công và tiếp tục gọi `actStore.add(...)` để tạo Activity mới trong cùng transaction. Transaction của Tab A commit thành công.
+  3. Tab B cùng gọi `occStore.add(...)` với cùng khóa `occurrenceId`:
+     - Engine IndexedDB ngay lập tức phát hiện khóa đã tồn tại trên đĩa và ném lỗi `ConstraintError`.
+     - Transaction của Tab B bắt lấy ngoại lệ `ConstraintError` và hủy thao tác thêm mới.
+     - Tab B chuyển sang đọc lại bản ghi vừa được tạo thành công bằng `occStore.get(occurrenceId)`.
+     - Tab B lấy `generatedActivityId` từ Occurrence đọc được và tái sử dụng Activity đã được Tab A tạo sẵn.
+  4. **Kết quả:** Tuyệt đối không sinh Activity trùng lặp giữa hai tab.
+
+### 3. Quy tắc Edit Single Occurrence (Bảo toàn trọn vẹn quan hệ nguồn):
+Khi người dùng chọn "Chỉnh sửa chỉ lần này" (Edit Single Occurrence) tại ngày `D`:
+- Activity tương ứng trong store `activities` được cập nhật các thuộc tính riêng (thay đổi giờ, tiêu đề, mô tả...).
+- Bản ghi trong store `recurrenceOccurrences` tương ứng được cập nhật:
+  - **`recurrenceRuleId`:** **GIỮ NGUYÊN** (bảo toàn quan hệ nguồn với quy tắc lặp).
+  - **`originalDate`:** **GIỮ NGUYÊN** (bảo toàn ngày lịch ban đầu).
+  - **`generatedActivityId`:** **GIỮ NGUYÊN** (vẫn trỏ đúng Activity đó).
+  - **`isOverridden = true`** (đánh dấu đã được chỉnh sửa độc lập).
+  - **`updatedAt = ISO 8601`**.
+- Trong Activity: giữ nguyên `recurrenceRuleId`, giữ nguyên `occurrenceId`, và đánh dấu `isOccurrenceOverridden: true`.
+- **Ý nghĩa kiến trúc:** Lần lặp này vẫn thuộc về chuỗi nguồn trong các báo cáo tiến độ, nhưng cờ `isOverridden = true` bảo vệ bản ghi khỏi việc bị ghi đè khi quy tắc gốc bị cập nhật ("Edit All Future Occurrences").
+
+---
+
+## V. CƠ CHẾ GIAO DỊCH ATOMIC CHO BACKUP & RESTORE TRÊN 10 OBJECT STORES
+
+### 1. Phân biệt rõ hai tầng bảo vệ và Giới hạn của RAM Snapshot:
+- **Tầng 1 (IndexedDB Engine Transaction Rollback - CỐT LÕI & DUY NHẤT ĐÁNG TIN CẬY):**
+  - Mọi thao tác `clear` và `put` của cả 10 Object Stores đều diễn ra trong 1 transaction `readwrite` duy nhất.
+  - Khi có lỗi hoặc người dùng hủy, IndexedDB engine đảm bảo tính ACID, rollback toàn bộ trạng thái cơ sở dữ liệu trên ổ đĩa về trước phiên làm việc.
+- **Tầng 2 (Application In-Memory Snapshot Backup - CHỈ LÀ BIỆN PHÁP HỖ TRỢ):**
+  - Bản chụp dữ liệu trong RAM chỉ là lớp hỗ trợ ở tầng ứng dụng JavaScript để hoàn tác nhanh trong phiên làm việc còn sống.
+  - **LƯU Ý KỸ THUẬT:** Snapshot trong RAM **KHÔNG THỂ BẢO ĐẢM KHÔI PHỤC** nếu tab trình duyệt bị crash, tiến trình bị tắt đột ngột (killed) hoặc mất điện trong lúc đang ghi. Vì vậy, sự an toàn toàn vẹn dữ liệu phải dựa hoàn toàn vào tính nguyên tử của Transaction IndexedDB.
+
+### 2. Quy tắc Không có khoảng trễ Bất đồng bộ (No Async Gap in Transaction):
+> [!CAUTION]
+> **Quy tắc sống còn của IndexedDB:** Trình duyệt sẽ tự động commit và đóng transaction (`auto-commit`) ngay khi hàng đợi sự kiện (event loop) quay lại mà không còn request IndexedDB nào đang chờ.
+> **TUYỆT ĐỐI KHÔNG ĐƯỢC** thực hiện các thao tác bất đồng bộ như `await fetch()`, `await new Promise(...)`, `setTimeout` hoặc đọc file async ở giữa các câu lệnh của transaction.
+
+### 3. Quy trình Replace chuẩn mực:
 
 ```
-[Bắt đầu Restore File JSON]
+[Nhận file Backup JSON]
        │
        ▼
-[1. Deep Schema Validation] ──(Dữ liệu lỗi/thiếu)──► [Báo lỗi chi tiết & Hủy, Không chạm DB]
+[1. Deep Schema Validation] ──(Lỗi cấu trúc/dữ liệu)──► [Báo lỗi chi tiết & DỪNG NGAY. Không mở DB]
        │ (Hợp lệ 100%)
        ▼
-[2. Snapshot In-Memory Backup] (Lưu bản chụp hiện tại của cả 10 Object Stores)
+[2. Chuẩn bị trước toàn bộ mảng dữ liệu trong RAM] (Bóc tách dữ liệu 10 stores thành mảng sẵn sàng)
        │
        ▼
 [3. Mở duy nhất 1 Single readwrite Transaction qua CẢ 10 OBJECT STORES]
@@ -252,95 +308,59 @@ type ActualDurationSource =
          'projectJournalEntries'
        ], 'readwrite')
        │
-       ├──► Trong cùng transaction: clearStore() tuần tự cho cả 10 stores
+       ├──► Gọi đồng bộ liên tục: tx.objectStore(name).clear() cho cả 10 stores
        │
-       ├──► Trong cùng transaction: put() từng bản ghi đã qua xác thực vào từng store
+       ├──► Gọi đồng bộ liên tục: tx.objectStore(name).put(item) cho toàn bộ bản ghi
        │
        ▼
-[4. Lắng nghe kết quả Transaction]
-    ├─── tx.oncomplete ──► Thông báo Phục hồi Thành công & Phát sự kiện cập nhật UI
+[4. Xác định kết quả qua các sự kiện giao dịch]
+    ├─── tx.oncomplete ──► Toàn bộ 10 store đã ghi bền vững vào đĩa.
+    │                      Phát sự kiện cập nhật UI & thông báo Thành công cho người dùng.
     │
-    └─── tx.onerror / tx.onabort ──► IndexedDB Engine tự động ROLLBACK hoàn toàn.
-                                    Ứng dụng khôi phục Snapshot bộ nhớ nếu cần thiết.
+    ├─── tx.onerror ─────► Giao dịch phát sinh lỗi (I/O, quota, constraint...).
+    │                      Gọi tx.abort() (nếu chưa tự abort).
+    │
+    └─── tx.onabort ─────► Toàn bộ thay đổi của cả 10 store bị hủy bỏ hoàn toàn.
+                           Dữ liệu tự động quay về trạng thái ban đầu trước khi Restore.
 ```
 
-> **QUY TẮC BẮT BUỘC:** Tuyệt đối không mở các transaction riêng biệt cho từng thao tác `clear` rồi mới mở transaction khác để `add`. Tất cả phải nằm trong **CÙNG MỘT TRANSACTION READWRITE DUY NHẤT** trên toàn bộ 10 stores.
-
 ---
 
-## V. MÔ HÌNH OCCURRENCE VÀ QUY TẮC LỊCH LẶP BỀN VỮNG (RECURRING SCHEDULE)
+## VI. PHÂN ĐỊNH 5 TẦNG KIẾN TRÚC TRONG GIAI ĐOẠN 1
 
-### 1. Kiến trúc phân tách Rule và Occurrence
-Hệ thống không sinh trước hàng nghìn bản ghi làm tràn bộ nhớ. Thay vào đó, áp dụng mô hình định danh tất định và lưu trữ bền vững trong `recurrenceOccurrences`:
-
-- Khóa định danh: `occurrenceId = 'occ_${ruleId}_${date}'` (Ví dụ: `occ_rec_abc123_2026-11-25`).
-- Mỗi khi cần hiển thị trên Timeline trong khoảng ngày hiển thị (viewport 7 - 30 ngày), hệ thống kiểm tra sự tồn tại của `occurrenceId` trực tiếp trong Object Store `recurrenceOccurrences`.
-
-### 2. Cơ chế chống tạo trùng bền vững sau khi reload và mở nhiều tab:
-- **Không chỉ kiểm tra trong bộ nhớ:** Nếu chỉ lưu cache trong memory hoặc `Set`, khi người dùng nhấn F5/reload hoặc mở cùng lúc 2 tab trình duyệt, hai luồng độc lập sẽ cùng sinh hoạt động trùng lặp cho cùng một ngày.
-- **Giải pháp bảo vệ bằng IndexedDB Persistence:**
-  1. Store `recurrenceOccurrences` sử dụng `occurrenceId` làm khóa chính (`keyPath`) và có unique index `occurrenceId`.
-  2. Khi sinh lịch cho ngày `D`, hệ thống thực hiện kiểm tra bản ghi trong store `recurrenceOccurrences`.
-  3. Nếu bản ghi đã tồn tại: Hệ thống dùng lại `generatedActivityId` đã lưu, tuyệt đối không tạo thêm bản ghi `activity` mới.
-  4. Nếu mở 2 tab cùng lúc và cả hai cùng cố gắng chèn: Nhờ ràng buộc khóa chính của IndexedDB, tab thứ hai sẽ gặp lỗi vi phạm khóa duy nhất (`ConstraintError`), giao dịch của tab thứ hai bị hủy an toàn và tab đó sẽ đọc lại bản ghi vừa được tab thứ nhất tạo thành công.
-
-### 3. Quy tắc Edit Single Occurrence (Bảo toàn quan hệ nguồn):
-Khi người dùng chọn "Chỉnh sửa chỉ lần này" (Edit Single Occurrence) tại ngày `D`:
-- Activity sinh ra tại ngày `D` được cập nhật các thuộc tính riêng (thay đổi giờ, tiêu đề, mô tả...).
-- Bản ghi `recurrenceOccurrences` tương ứng được cập nhật:
-  - `isOverridden = true`.
-  - `updatedAt = ISO 8601`.
-  - **GIỮ NGUYÊN `recurrenceRuleId`** và `originalDate`.
-- Hoạt động trong `activities` vẫn lưu trường `recurrenceRuleId` và cờ `isOccurrenceOverridden: true`.
-- **Ý nghĩa kiến trúc:** Không làm mất quan hệ với recurrence rule gốc. Khi người dùng xem lịch sử chuỗi hoặc báo cáo dự án, hệ thống vẫn nhận diện chính xác lần lặp này bắt nguồn từ quy tắc nào, đồng thời cờ `isOverridden = true` bảo vệ bản ghi khỏi việc bị ghi đè khi quy tắc gốc bị cập nhật ("Edit All Future Occurrences").
-
-### 4. Quy tắc Bỏ qua ngày (Skip/Cancel Occurrence):
-- Khi người dùng chọn "Bỏ qua lần này":
-  - Bản ghi `recurrenceOccurrences` cập nhật `isCancelled = true`.
-  - Nếu đã có activity tương ứng được sinh ra, activity đó sẽ được đánh dấu `status = 'Cancelled'` hoặc xóa an toàn.
-  - Ngày `D` được ghi nhận để không bao giờ tự động tái sinh lại.
-
-### 5. Quy tắc Sửa toàn bộ chuỗi (Edit All Future Occurrences):
-- Cập nhật bản mẫu `activityTemplate` trong `recurrenceRules`.
-- Cập nhật các activity tương lai thuộc chuỗi mà có `isOverridden === false`. Các lần lặp đã có `isOverridden === true` được bảo vệ nguyên vẹn.
-
----
-
-## VI. PHÂN BIỆT 5 TẦNG KIẾN TRÚC TRONG GIAI ĐOẠN 1
-
-Nhằm bảo đảm tính minh bạch và kỷ luật kỹ thuật, việc nâng cấp được phân định rành mạch qua 5 tầng. **Giai đoạn 1 chỉ tập trung vào Tầng 1 và Tầng 2**, tuyệt đối không báo cáo tính năng đã hoàn thành khi các tầng trên chưa được triển khai:
-
-| Tầng kiến trúc | Vai trò & Trách nhiệm | Triển khai trong Giai đoạn 1 |
+| Tầng kiến trúc | Vai trò | Phạm vi triển khai trong Giai đoạn 1 |
 | :--- | :--- | :---: |
-| **1. Database Schema** | Định nghĩa 10 Object Stores, cấu hình indexes, viết cursor migration dữ liệu V1 ➔ V2 an toàn | **HOÀN THÀNH TRONG GĐ 1** |
-| **2. Repository** | Cung cấp các thao tác CRUD cơ bản nguyên tử trên từng Object Store (`getById`, `getAll`, `put`, `delete`) | **HOÀN THÀNH TRONG GĐ 1** |
-| **3. Service** | Xử lý logic nghiệp vụ phức tạp: tính toán window occurrence, giải quyết xung đột, Pomodoro timer, dự án | *Thuộc Giai đoạn 2 & 3* |
-| **4. Business Logic** | Điều phối tương tác giữa các service, quản lý state toàn cục, đồng bộ các dòng chảy dữ liệu | *Thuộc Giai đoạn 2 & 3* |
-| **5. UI Components** | Giao diện người dùng: Timeline, Modal, Widgets, Sidebar, Trang Focus, Trang Projects | *Thuộc Giai đoạn 2, 3, 4* |
+| **1. Database Schema** | Tạo 10 Object Stores, cấu hình indexes chuẩn (bỏ index trùng keyPath), cursor migration V1 ➔ V2 an toàn | **HOÀN THÀNH 100% TRONG GĐ 1** |
+| **2. Repository** | Cung cấp CRUD nguyên tử cơ bản cho 10 stores độc lập | **HOÀN THÀNH 100% TRONG GĐ 1** |
+| **3. Service** | Business logic: tính occurrence window, pomodoro cycles, project progress | *Thuộc Giai đoạn 2 và 3* |
+| **4. Business Logic** | Điều phối luồng dữ liệu liên service, state toàn cục | *Thuộc Giai đoạn 2 và 3* |
+| **5. UI Components** | Giao diện Timeline, Modal, Widgets, Focus Page, Projects Page | *Thuộc Giai đoạn 2, 3, 4* |
 
-> **LƯU Ý NGHIÊM NGẶT:** Việc tạo Object Store `projects`, `recurrenceRules`, `recurrenceOccurrences`, và `projectJournalEntries` trong Giai đoạn 1 chỉ phục vụ việc sẵn sàng về mặt cấu trúc lưu trữ và đảm bảo di chuyển schema một lần duy nhất. Không được báo cáo tính năng Lịch lặp hoặc Hồ sơ dự án đã hoàn thành khi Tầng Service và Tầng UI chưa được xây dựng.
+> **Cam kết:** Giai đoạn 1 chỉ bàn giao Database Schema (10 stores) và Repositories nền tảng, cùng với cơ chế toàn vẹn dữ liệu và vá lỗi XSS. Tuyệt đối không báo cáo tính năng Lịch lặp hoặc Hồ sơ dự án đã hoàn thành khi Tầng Service và Tầng UI chưa hoàn thiện.
 
 ---
 
-## VII. BỘ TEST CASES MỞ RỘNG CHO MIGRATION VÀ DATA INTEGRITY (18 TEST SCENARIOS)
+## VII. BỘ TEST CASES MỞ RỘNG (20 TEST SCENARIOS)
 
 | Mã Test | Kịch bản kiểm thử | Tiêu chí nghiệm thu |
 | :--- | :--- | :--- |
 | **MIG-01** | Database V1 rỗng nâng cấp lên V2 | Tạo đủ 10 stores, `DB_VERSION = 2`, không phát sinh exception. |
 | **MIG-02** | Database V1 có đầy đủ dữ liệu 6 stores cũ | Toàn bộ số lượng bản ghi của 6 store cũ được bảo toàn 100%. |
-| **MIG-03** | Hoạt động trạng thái `Planned` không có timer | `actualDurationSeconds = 0`, `actualDurationMinutes = 0`, `actualDurationSource = 'unperformed'`. |
+| **MIG-03** | Hoạt động trạng thái `Planned` có số phút cũ = 0 | `actualDurationSeconds = 0`, `actualDurationMinutes = 0`, `actualDurationSource = 'unperformed'`. |
 | **MIG-04** | Hoạt động `Completed` có timerSessions | `actualDurationSeconds` = tổng số giây từ timer, `actualDurationSource = 'timer_verified'`. |
-| **MIG-05** | Hoạt động có bằng chứng nhập thủ công tường minh | Có cờ `manuallyConfirmed` hoặc `source === 'manual'`, `actualDurationSource = 'manual_verified'`. |
-| **MIG-06** | Hoạt động cũ không có bằng chứng nguồn | `actualDurationMinutes` giữ nguyên không đổi, gắn cờ `actualDurationSource = 'legacy_unverified'`. |
-| **MIG-07** | Phân tách Verified Actual Time vs Legacy | Dữ liệu `legacy_unverified` KHÔNG được cộng vào `Verified Actual Time`. |
-| **MIG-08** | Không cộng trùng Timer và Manual | Nguồn thời gian được xác định độc lập, không cộng dồn hai lần giữa session và manual. |
-| **MIG-09** | Lỗi bất ngờ khi nâng cấp store | Transaction bị abort, DB giữ nguyên version 1, dữ liệu không biến dạng. |
-| **MIG-10** | Nhiều tab trình duyệt cùng mở khi upgrade | Xử lý `onversionchange` đóng kết nối tab cũ an toàn, `onblocked` phát cảnh báo rõ ràng. |
-| **MIG-11** | Chống tạo trùng Occurrence sau Reload | Sau khi reload trình duyệt / re-init DB, truy vấn `recurrenceOccurrences` không sinh trùng `occurrenceId`. |
-| **MIG-12** | Chống tạo trùng Occurrence giữa hai tab đồng thời | Hai transaction ghi cùng một `occurrenceId`, nhờ unique index chỉ 1 bản ghi duy nhất được tạo thành công. |
-| **MIG-13** | Sửa một lần lặp (Edit Single Occurrence) | Cập nhật `isOverridden = true`, nhưng GIỮ NGUYÊN `recurrenceRuleId` và `originalDate`. |
-| **MIG-14** | Tạo Project mới và liên kết Activity | Activity truy vấn được qua index `projectId`, không mất các trường dữ liệu V1. |
-| **MIG-15** | Tạo Project Journal Entry độc lập | Entry lưu vào `projectJournalEntries`, không ảnh hưởng tới `notes` hay `dailyNotes`. |
-| **MIG-16** | Xóa Project có cảnh báo an toàn | Không xóa mồ côi activities liên quan; hỗ trợ tùy chọn hủy liên kết dự án an toàn. |
-| **MIG-17** | Replace Backup nguyên tử trên cả 10 stores | Toàn bộ 10 store được `clear` và `put` trong duy nhất 1 transaction readwrite; rollback 100% nếu có lỗi. |
-| **MIG-18** | Export Backup JSON phiên bản 2.0.0 | File JSON xuất ra chứa đầy đủ dữ liệu của toàn bộ 10 Object Stores và thông tin phiên bản hợp lệ. |
+| **MIG-05** | Hoạt động vừa có Timer vừa có cờ nhập thủ công | Ưu tiên dữ liệu Timer (`timer_verified`), không cộng dồn hai lần. |
+| **MIG-06** | Hoạt động có bằng chứng nhập thủ công tường minh | Có cờ `manuallyConfirmed` hoặc `source === 'manual'`, gán `manual_verified`. |
+| **MIG-07** | Hoạt động `Completed` có phút cũ nhưng thiếu bằng chứng | Giữ nguyên số phút cũ, gán `actualDurationSource = 'legacy_unverified'`. |
+| **MIG-08** | **Hoạt động `Planned` V1 có số phút cũ `> 0`** | **Giữ nguyên số phút cũ (không reset về 0), gán `legacy_unverified`.** |
+| **MIG-09** | **Phân tách Verified Actual Time vs Legacy** | **Dữ liệu `legacy_unverified` KHÔNG được cộng vào `Verified Actual Time`.** |
+| **MIG-10** | Lỗi bất ngờ khi nâng cấp store | Transaction bị abort, DB giữ nguyên version 1, dữ liệu không biến dạng. |
+| **MIG-11** | Nhiều tab trình duyệt cùng mở khi upgrade | Xử lý `onversionchange` đóng kết nối tab cũ an toàn, `onblocked` phát cảnh báo rõ ràng. |
+| **MIG-12** | Chống tạo trùng Occurrence sau Reload | Sau khi reload trình duyệt / re-init DB, truy vấn `recurrenceOccurrences` không sinh trùng `occurrenceId`. |
+| **MIG-13** | **Hai tab cùng ghi đồng thời một Occurrence** | Sử dụng `add()`, tab thứ 2 bắt `ConstraintError`, đọc lại record có sẵn, không sinh Activity trùng. |
+| **MIG-14** | **Sửa một lần lặp (Edit Single Occurrence)** | Cập nhật `isOverridden = true`, GIỮ NGUYÊN `recurrenceRuleId`, `originalDate`, `generatedActivityId`. |
+| **MIG-15** | Tạo Project mới và liên kết Activity | Activity truy vấn được qua index `projectId`, không mất các trường dữ liệu V1. |
+| **MIG-16** | Tạo Project Journal Entry độc lập | Entry lưu vào `projectJournalEntries`, không ảnh hưởng tới `notes` hay `dailyNotes`. |
+| **MIG-17** | Xóa Project có cảnh báo an toàn | Không xóa mồ côi activities liên quan; hỗ trợ tùy chọn hủy liên kết dự án an toàn. |
+| **MIG-18** | **Replace Backup nguyên tử trên cả 10 stores** | Toàn bộ 10 store được `clear` và `put` trong duy nhất 1 transaction readwrite; rollback 100% nếu có lỗi. |
+| **MIG-19** | **Không có async gap trong transaction** | Chuẩn bị dữ liệu xong trước khi mở transaction, ngăn ngừa lỗi transaction auto-commit ngoài ý muốn. |
+| **MIG-20** | Export Backup JSON phiên bản 2.0.0 | File JSON xuất ra chứa đầy đủ dữ liệu của toàn bộ 10 Object Stores và thông tin phiên bản hợp lệ. |

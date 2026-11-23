@@ -12,18 +12,14 @@
 ### 1. Hiện trạng Git Remote & Local
 - **Repository Remote:** `https://github.com/AhNguyeen/Personal-Work-Journal.git`
 - **Remote HEAD:** Trỏ vào `origin/master`.
-- **Nhánh `master`:** Chứa commit cập nhật tài liệu chuẩn hóa và đồng bộ với remote.
-- **Nhánh `main`:** Nhánh đã cấu hình kết nối trực tiếp với GitHub Pages environment (`https://ahnguyeen.github.io/Personal-Work-Journal/`).
-- **So sánh mã nguồn giữa `main` và `master`:**
-  - Cây mã nguồn cốt lõi giữa hai nhánh đồng nhất.
-  - Mọi thao tác chuẩn bị nâng cấp tài liệu được thực hiện trên nhánh `master`.
-
-### 2. Quy trình kiểm toán an toàn tuyệt đối
-- **Nguyên tắc bất di bất dịch:**
-  - Không tự ý sửa đổi source code trong quá trình hoàn thiện tài liệu.
-  - Không thay đổi cấu trúc dữ liệu IndexedDB thực tế trên trình duyệt khi chưa có lệnh chính thức.
-  - Không deploy lên môi trường production khi chưa hoàn thành kiểm thử.
-  - Giữ nguyên lịch sử Git, không force push, không xóa nhánh.
+- **Nhánh `master`:** Nhánh bắt buộc thực hiện kiểm toán và lưu trữ toàn bộ các tài liệu đặc tả kiến trúc.
+- **Nhánh `main`:** Nhánh triển khai GitHub Pages (`https://ahnguyeen.github.io/Personal-Work-Journal/`).
+- **Nguyên tắc an toàn:**
+  - Tuyệt đối không tự ý sửa đổi source code trong quá trình hoàn thiện tài liệu.
+  - Không thay đổi cấu trúc dữ liệu IndexedDB thực tế trên trình duyệt.
+  - Không deploy lên môi trường production khi chưa có phê duyệt chính thức.
+  - Không chuyển nội dung sang `main` trong phiên làm việc này.
+  - Không force push, không xóa nhánh, bảo toàn toàn vẹn lịch sử Git.
 
 ---
 
@@ -42,49 +38,40 @@
   - Bổ sung 4 Object Stores mới:
     7. `projects` (keyPath: `id`, indexes: `status`, `category`, `createdAt`).
     8. `recurrenceRules` (keyPath: `id`, indexes: `recurrenceType`, `startDate`, `createdAt`).
-    9. `recurrenceOccurrences` (keyPath: `occurrenceId`, indexes: `occurrenceId` [unique], `recurrenceRuleId`, `originalDate`, `generatedActivityId`, `isOverridden`, `isCancelled`, `createdAt`).
+    9. `recurrenceOccurrences` (keyPath: `occurrenceId`, indexes: `recurrenceRuleId`, `originalDate`, `generatedActivityId`, `isOverridden`, `isCancelled`, `createdAt`). *Lưu ý tối ưu: Không tạo index `occurrenceId` vì trường này đã là `keyPath` mang ràng buộc duy nhất.*
     10. `projectJournalEntries` (keyPath: `id`, indexes: `projectId`, `date`, `createdAt`).
 - **Các lỗ hổng & rủi ro phát hiện trong V1 (P0/P1):**
   - **Lỗi bẫy Promise trong `initDatabase()`:** Thuộc tính `this._initPromise` lưu giữ Promise kết nối. Nếu kết nối bị lỗi hoặc bị abort một lần, `this._initPromise` bị giữ ở trạng thái rejected vĩnh viễn, ngăn cản các lần thử kết nối lại của người dùng. Cần reset `this._initPromise = null` trong khối `.catch()`.
   - **Thiếu lắng nghe sự kiện `onblocked` và `onclose`:** Khi mở nhiều tab hoặc trong quá trình nâng cấp version, thiếu handler `onblocked` có thể khiến kết nối bị treo.
-  - **Rủi ro mất dữ liệu trong `importData()` (Replace Mode):** Trong chế độ `replace`, các store hiện bị `clearStore()` theo các transaction rời rạc trước khi import. Nếu xảy ra lỗi giữa chừng, dữ liệu cũ đã bị xóa dở dang mà không thể khôi phục tự động. Bắt buộc phải đưa toàn bộ thao tác `clear` và `import` của **CẢ 10 OBJECT STORES** vào **CÙNG MỘT TRANSACTION READWRITE DUY NHẤT** để đảm bảo rollback tuyệt đối.
+  - **Rủi ro mất dữ liệu trong `importData()` (Replace Mode):**
+    - Trong chế độ `replace`, các store hiện bị `clearStore()` theo các transaction rời rạc trước khi import. Nếu xảy ra lỗi giữa chừng, dữ liệu cũ đã bị xóa dở dang mà không thể khôi phục tự động.
+    - **Yêu cầu kiểm toán:** Toàn bộ thao tác `clear` và `import` của **CẢ 10 OBJECT STORES** bắt buộc phải nằm trong **CÙNG MỘT TRANSACTION READWRITE DUY NHẤT**.
+    - **Rủi ro Auto-Commit do Async Gap:** Nếu có thao tác bất đồng bộ (`await`, `setTimeout`) trong transaction, transaction sẽ tự động commit và đóng trước khi ghi xong. Toàn bộ validation và chuẩn bị dữ liệu phải hoàn tất 100% trước khi mở transaction.
+    - **Giới hạn của Snapshot trong RAM:** Bản chụp bộ nhớ RAM chỉ là lớp hỗ trợ ở tầng ứng dụng, không thể bảo đảm phục hồi nếu tab trình duyệt bị crash hoặc tiến trình bị tắt đột ngột. Cơ chế rollback cốt lõi phải dựa vào IndexedDB Transaction Rollback.
 
 ### 2. Tầng nghiệp vụ (Service Layer) & Kiểm toán nguồn gốc thời gian (Actual Duration Provenance)
-- **`activityService.js`:**
-  - **Vấn đề tự gán sai lệch Actual Duration:** Khi tạo mới hoạt động, thuộc tính `actualDurationMinutes` đang được gán mặc định bằng `durationMinutes` (thời gian dự kiến):
-    ```javascript
-    actualDurationMinutes: Number(rawData.actualDurationMinutes) || durationMinutes
-    ```
-    Điều này làm sai lệch thống kê hiệu suất nghiêm trọng vì một việc chỉ mới "lên lịch" (`Planned`) đã bị tính như thể đã làm xong đúng số giờ đó.
-  - **Rủi ro nhận diện sai `manual_verified`:**
-    - Không được xem điều kiện `actualDurationMinutes !== durationMinutes` là bằng chứng người dùng đã xác nhận thủ công.
-    - **Yêu cầu kiểm toán nguồn:** Chỉ phân loại `manual_verified` khi có bằng chứng người dùng chủ động nhập hoặc xác nhận dữ liệu thủ công (cờ `manuallyConfirmed === true`, `manualEntry === true`, `source === 'manual'`, hoặc phiên `type === 'manual'` trong `timerSessions`).
-    - Nếu không xác định được nguồn thì bắt buộc giữ nhãn `legacy_unverified`.
-    - **Tách bạch tính toán:** Dữ liệu `legacy_unverified` tuyệt đối không được tính chung vào tổng thời gian thực tế đã xác minh (**Verified Actual Time**). Phải tách riêng thành "Thời gian ước tính cũ / Chưa xác minh" (Unverified Legacy Time) để bảo toàn tính trung thực của báo cáo hiệu suất.
-    - Giữ nguyên số phút/giây cũ để bảo toàn dữ liệu lịch sử, không âm thầm xóa hay làm biến đổi số liệu cũ.
+- **Kiểm toán thứ tự ưu tiên (Priority Order):**
+  1. `timer_verified` (Ưu tiên 1): Có phiên hoàn tất trong `timerSessions`. Nếu vừa có Timer vừa có nhập tay, ưu tiên lấy dữ liệu Timer, tuyệt đối không cộng dồn.
+  2. `manual_verified` (Ưu tiên 2): Đòi hỏi bằng chứng người dùng chủ động xác nhận (`manuallyConfirmed === true`, `manualEntry === true`, `source === 'manual'`, hoặc phiên `type === 'manual'`). Không nhận diện chỉ bằng `actualDurationMinutes !== durationMinutes`.
+  3. `legacy_unverified` (Ưu tiên 3): Dữ liệu V1 cũ có `actualDurationMinutes > 0` nhưng không rõ bằng chứng nguồn.
+     - **Trường hợp Activity `Planned` có số phút cũ:** Trong V1 cũ, khi tạo mới hoạt động `Planned`, hệ thống tự gán `actualDurationMinutes = durationMinutes`. Ta **KHÔNG ĐƯỢC TỰ Ý XÓA HOẶC RESET VỀ 0 LÀM MẤT GIÁ TRỊ LỊCH SỬ**. Bắt buộc giữ nguyên giá trị cũ và gán nhãn `legacy_unverified`.
+     - **Tách bạch tính toán:** Dữ liệu `legacy_unverified` **tuyệt đối KHÔNG được tính chung** vào `Verified Actual Time`.
+  4. `unperformed` (Ưu tiên 4): Hoạt động `Planned` và `actualDurationMinutes === 0` (hoặc rỗng), thời gian thực tế = 0.
 
-### 3. Kiểm toán Lịch lặp lại & Cơ chế Chống trùng bền vững (Recurring Occurrence Persistence)
-- **Rủi ro tạo trùng đa tab và sau khi reload:**
-  - Nếu chỉ kiểm tra các lần xuất hiện bằng bộ nhớ tạm (In-Memory Set/Array), khi người dùng F5 hoặc mở 2 tab cùng một lúc, hai luồng độc lập sẽ cùng sinh hoạt động cho cùng một ngày, gây nhân bản dữ liệu rác.
-  - **Giải pháp kiểm toán:** Bắt buộc lưu trữ các lần xuất hiện vào Object Store vật lý `recurrenceOccurrences` với `keyPath: 'occurrenceId'` và unique index `occurrenceId`. Sự bền vững của IndexedDB và cơ chế transaction isolation sẽ chặn đứng hoàn toàn việc sinh trùng giữa các tab và sau reload.
+### 3. Kiểm toán Lịch lặp lại & Cơ chế Chống trùng đa tab nguyên tử (Atomic Multi-tab Concurrence)
+- **Scope giao dịch nguyên tử:** Việc kiểm tra và tạo Occurrence cùng Activity bắt buộc phải thực hiện trong một transaction `readwrite` bao gồm cả `recurrenceOccurrences` và `activities`.
+- **Sử dụng `add()` và xử lý `ConstraintError`:**
+  - Bắt buộc dùng `occStore.add()` thay vì `put()`.
+  - Khi hai tab cùng mở và cố gắng tạo Occurrence cho cùng một ngày, tab thứ hai sẽ bắt lỗi `ConstraintError`.
+  - Tab thứ hai hủy thêm mới an toàn, đọc lại bản ghi qua `occStore.get(occurrenceId)`, lấy `generatedActivityId` để dùng lại Activity đã được tạo bởi tab thứ nhất, triệt tiêu hoàn toàn nguy cơ sinh trùng lặp Activity.
 - **Quy tắc Edit Single Occurrence:**
-  - Khi sửa một lần lặp duy nhất, không được cắt đứt quan hệ với quy tắc nguồn. Bản ghi `recurrenceOccurrences` phải giữ nguyên `recurrenceRuleId` và `originalDate`, đồng thời bật `isOverridden = true`.
+  - Giữ nguyên `recurrenceRuleId`, `originalDate`, `generatedActivityId` trong `recurrenceOccurrences` và cập nhật `isOverridden = true`.
+  - Activity cập nhật thông tin riêng, giữ nguyên liên kết `recurrenceRuleId`, `occurrenceId` và đánh dấu `isOccurrenceOverridden: true`.
 
 ### 4. Kiểm toán Bảo mật (Security & XSS Audit)
 - **`src/app.js` (Global Search):**
-  - Trong phương thức `_handleGlobalSearch()`, kết quả tìm kiếm được nối trực tiếp vào chuỗi HTML thông qua template literal:
-    ```javascript
-    <strong style="font-size: 14px;">${a.title}</strong>
-    <div style="font-size: 12px;">${a.description || 'Không có mô tả'}</div>
-    ...
-    <div style="font-size: 12px;">${(n.content || '').substr(0, 80)}...</div>
-    ```
-  - **Rủi ro XSS:** Nếu người dùng nhập hoặc import dữ liệu có chứa `<img src=x onerror=alert(1)>` hoặc `<script>`, mã độc có thể được thực thi khi hiển thị kết quả tìm kiếm.
-  - **Giải pháp:** Bắt buộc áp dụng `escapeHTML()` cho mọi trường văn bản trước khi đưa vào template hoặc dùng phương thức tạo DOM / `textContent`.
-
-### 5. Triết lý Sản phẩm & Trải nghiệm UI/UX
-- Duy trì tuyệt đối **Daily Schedule Timeline (24h)** và **Daily Reflection Journal**. Hoàn toàn không có Kanban Board, không có cột trạng thái kéo thả To Do / Doing / Done.
-- Giao diện nhất quán với các hình ảnh thiết kế chuẩn mực: trục thời gian trực quan, so sánh Planned vs Actual, bộ đếm Pomodoro tối giản, và hồ sơ dự án độc lập.
+  - Kết quả tìm kiếm hiện nối chuỗi trực tiếp vào `innerHTML` mà chưa escape HTML.
+  - Bắt buộc áp dụng `escapeHTML()` cho toàn bộ các trường hiển thị (`title`, `description`, `content`) để ngăn ngừa tấn công XSS.
 
 ---
 
@@ -95,9 +82,9 @@
 | **SEC-01** | Global Search | XSS qua nội dung tìm kiếm chưa escape HTML | **P0 - Critical** | Áp dụng `escapeHTML` cho tất cả thuộc tính hiển thị |
 | **DATA-01** | IndexedDB | `_initPromise` bị kẹt khi lỗi, thiếu `onblocked`/`onclose` | **P0 - Critical** | Reset promise trong `.catch()`, thêm handler `onblocked` |
 | **DATA-02** | Activity Service | `actualDurationMinutes` tự gán bằng `durationMinutes` | **P0 - Critical** | Chuẩn hóa `actualDurationSeconds` và phân loại 4 nguồn dữ liệu |
-| **DATA-03** | Actual Provenance | Nhận diện sai `manual_verified` chỉ qua độ lệch thời gian | **P0 - Critical** | Đòi hỏi bằng chứng xác nhận chủ động; tách riêng `legacy_unverified` |
-| **DATA-04** | Backup/Restore | Import thiếu validation schema từng store & atomic transaction | **P1 - High** | Validate cấu trúc sâu, chạy 1 transaction duy nhất qua 10 stores |
-| **DATA-05** | Recurrence Store | Nguy cơ tạo trùng occurrence sau reload và khi mở nhiều tab | **P1 - High** | Thêm Object Store `recurrenceOccurrences`, unique index, persistence |
+| **DATA-03** | Actual Provenance | Nhận diện sai `manual_verified` chỉ qua độ lệch thời gian | **P0 - Critical** | Đòi hỏi bằng chứng xác nhận chủ động; bảo toàn lịch sử Planned cũ |
+| **DATA-04** | Backup/Restore | Nguy cơ mất dữ liệu do chia nhỏ transaction & async gap | **P1 - High** | Validate trước, 1 transaction readwrite qua 10 stores, không async gap |
+| **DATA-05** | Recurrence Store | Nguy cơ tạo trùng occurrence sau reload và khi mở nhiều tab | **P1 - High** | Dùng `add()`, bắt `ConstraintError`, transaction kép occurrence + activity |
 | **FEAT-01** | Recurrence Rules | Chưa có quy tắc lịch lặp lại (daily, weekly, custom) | **P1 - High** | Thêm Object Store `recurrenceRules` và mô hình quan hệ nguồn bền vững |
 | **FEAT-02** | Project Journal | Chưa có hồ sơ dự án và nhật ký tiến độ dự án riêng | **P1 - High** | Thêm Object Store `projects` và `projectJournalEntries` độc lập |
 | **FEAT-03** | Advanced Time | Chưa có Focus Mode riêng và Pomodoro Timer | **P1 - High** | Nâng cấp `timerService` hỗ trợ Pomodoro & Focus Screen |
@@ -108,11 +95,9 @@
 
 ## IV. MA TRẬN PHÂN ĐỊNH 5 TẦNG KIẾN TRÚC TRONG GIAI ĐOẠN 1
 
-Nhằm bảo đảm không nhầm lẫn giữa việc "tạo database store" với việc "tính năng đã hoàn thành", hệ thống quy định phân định tầng kiến trúc minh bạch:
-
 | Tầng kiến trúc | Vai trò | Phạm vi triển khai trong Giai đoạn 1 |
 | :--- | :--- | :---: |
-| **Database Schema** | Tạo 10 Object Stores, cấu hình indexes, cursor migration V1 ➔ V2 an toàn | **HOÀN THÀNH 100% TRONG GĐ 1** |
+| **Database Schema** | Tạo 10 Object Stores, cấu hình indexes chuẩn (bỏ index trùng keyPath), cursor migration V1 ➔ V2 an toàn | **HOÀN THÀNH 100% TRONG GĐ 1** |
 | **Repository** | Cung cấp CRUD nguyên tử cơ bản cho 10 stores độc lập | **HOÀN THÀNH 100% TRONG GĐ 1** |
 | **Service Layer** | Business logic: tính occurrence window, pomodoro cycles, project progress | *Thuộc Giai đoạn 2 và 3* |
 | **Business Logic** | Tích hợp liên service, điều phối luồng dữ liệu, xử lý state toàn cục | *Thuộc Giai đoạn 2 và 3* |
@@ -126,8 +111,8 @@ Nhằm bảo đảm không nhầm lẫn giữa việc "tạo database store" v�
 
 | Tệp tin | Trạng thái | Tầng kiến trúc | Nội dung tác động |
 | :--- | :---: | :---: | :--- |
-| `src/database/db.js` | Chỉnh sửa | Database Schema | Nâng `DB_VERSION = 2`, tạo đủ 10 Object Stores, thêm indexes, cursor migration |
-| `src/database/databaseService.js` | Chỉnh sửa | Database Core | Sửa `_initPromise`, thêm `onblocked`, hỗ trợ single-transaction replace qua 10 stores |
+| `src/database/db.js` | Chỉnh sửa | Database Schema | Nâng `DB_VERSION = 2`, tạo đủ 10 Object Stores, bỏ index thừa keyPath, cursor migration |
+| `src/database/databaseService.js` | Chỉnh sửa | Database Core | Sửa `_initPromise`, thêm `onblocked`, hỗ trợ single-transaction replace qua 10 stores không async gap |
 | `src/database/repositories/projectRepository.js` | **Tạo mới** | Repository | Repository CRUD cho Object Store `projects` |
 | `src/database/repositories/recurrenceRepository.js` | **Tạo mới** | Repository | Repository CRUD cho Object Store `recurrenceRules` |
 | `src/database/repositories/recurrenceOccurrenceRepository.js` | **Tạo mới** | Repository | Repository CRUD cho Object Store `recurrenceOccurrences` |
@@ -135,12 +120,12 @@ Nhằm bảo đảm không nhầm lẫn giữa việc "tạo database store" v�
 | `src/services/activityService.js` | Chỉnh sửa | Service | Chuẩn hóa `actualDurationSeconds`, liên kết `projectId` & `recurrenceRuleId` |
 | `src/services/timerService.js` | Chỉnh sửa | Service | Hỗ trợ chu trình Pomodoro & liên kết dự án `projectId` |
 | `src/services/projectService.js` | **Tạo mới** | Service | Nghiệp vụ dự án, tính tổng thời gian, tiến độ và nhật ký dự án |
-| `src/services/recurrenceService.js` | **Tạo mới** | Service | Tính toán và quản lý các lần xuất hiện của lịch lặp theo mô hình Occurrence bền vững |
-| `src/services/backupService.js` | Chỉnh sửa | Service | Hỗ trợ đầy đủ 10 Object Stores vào file backup JSON, thẩm định schema sâu và snapshot rollback |
+| `src/services/recurrenceService.js` | **Tạo mới** | Service | Tính toán và quản lý các lần xuất hiện theo transaction kép và xử lý `ConstraintError` |
+| `src/services/backupService.js` | Chỉnh sửa | Service | Hỗ trợ đầy đủ 10 Object Stores vào file backup JSON, thẩm định schema sâu và atomic replace |
 | `src/pages/Projects/ProjectsPage.js` | **Tạo mới** | UI | Màn hình quản lý dự án, Project Timeline và Project Journal Entries |
 | `src/pages/Focus/FocusPage.js` | **Tạo mới** | UI | Màn hình Focus Mode & Pomodoro tối giản |
 | `src/app.js` | Chỉnh sửa | UI & Security | Vá XSS Search, đăng ký routes `projects`, `focusMode` |
 | `src/components/Sidebar.js` | Chỉnh sửa | UI | Thêm mục `Projects` và `Focus Mode` |
 | `public/manifest.webmanifest` | **Tạo mới** | PWA | Web App Manifest cấu hình chuẩn GitHub Pages |
 | `public/sw.js` | **Tạo mới** | PWA | Service Worker quản lý offline cache an toàn |
-| `test/test-suite.js` | Chỉnh sửa | Testing | Mở rộng bổ sung 18 kịch bản test migration, provenance và nghiệp vụ V2 |
+| `test/test-suite.js` | Chỉnh sửa | Testing | Mở rộng bổ sung 20 kịch bản test migration, provenance, multi-tab và nghiệp vụ V2 |
