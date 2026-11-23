@@ -97,6 +97,7 @@ class TimerService {
       startTime: new Date(now).toISOString(),
       endTime: null,
       status: 'running',
+      type: 'timer',
       totalSeconds: 0
     });
 
@@ -174,16 +175,36 @@ class TimerService {
         session.status = 'completed';
         session.endTime = new Date().toISOString();
         session.totalSeconds = totalSecs;
+        session.type = session.type || 'timer';
         await timerRepository.update(session);
       }
     }
 
-    // Attach actual logged minutes to activity
+    // Attach actual logged minutes to activity with strict provenance separation
     if (finalActivityId && totalSecs > 0) {
       const act = await activityRepository.getById(finalActivityId);
       if (act) {
-        const addedMinutes = Math.round(totalSecs / 60);
-        act.actualDurationMinutes = (act.actualDurationMinutes || 0) + addedMinutes;
+        // Query all completed sessions to calculate accurate verified durations
+        const allSessions = await timerRepository.getByActivityId(finalActivityId);
+        let timerSeconds = 0;
+        let manualSeconds = 0;
+
+        for (const s of allSessions) {
+          const sType = s.type || 'timer';
+          const sSecs = s.status === 'completed' ? (Number(s.totalSeconds) || 0) : 0;
+          if (sType === 'timer' || sType === 'pomodoro') {
+            timerSeconds += sSecs;
+          } else if (sType === 'manual') {
+            manualSeconds += sSecs;
+          }
+        }
+
+        const totalVerifiedSecs = timerSeconds + manualSeconds;
+        act.actualDurationSeconds = totalVerifiedSecs;
+        act.actualDurationMinutes = Math.round(totalVerifiedSecs / 60);
+        act.actualDurationSource = timerSeconds > 0 ? 'timer_verified' : (manualSeconds > 0 ? 'manual_verified' : 'timer_verified');
+        act.timerSeconds = timerSeconds;
+        act.manualSeconds = manualSeconds;
         act.status = 'Completed';
         await activityRepository.update(act);
         if (typeof window !== 'undefined') {

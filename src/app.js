@@ -10,6 +10,7 @@ import { Sidebar } from './components/Sidebar.js';
 import { Header } from './components/Header.js';
 import { activityModal } from './components/ActivityModal.js';
 import { formatVietnameseDate } from './utils/dateUtils.js';
+import { escapeHTML } from './utils/formatters.js';
 
 // Pages
 import { DashboardPage } from './pages/Dashboard/DashboardPage.js';
@@ -206,7 +207,7 @@ export class App {
     if (matchedActivities.length === 0 && matchedNotes.length === 0) {
       resultsContainer.innerHTML = `
         <div style="text-align: center; padding: 32px; color: var(--text-muted);">
-          Không tìm thấy hoạt động hoặc ghi chú nào phù hợp với từ khóa "${keyword}".
+          Không tìm thấy hoạt động hoặc ghi chú nào phù hợp với từ khóa "${escapeHTML(keyword)}".
         </div>
       `;
       return;
@@ -219,11 +220,11 @@ export class App {
       html += matchedActivities.map(a => `
         <div class="card search-item-act" data-id="${a.id}" style="padding: 10px 14px; cursor: pointer;">
           <div style="display: flex; justify-content: space-between;">
-            <strong style="font-size: 14px;">${a.title}</strong>
-            <span style="font-size: 11px; color: var(--text-muted);">${formatVietnameseDate(a.date, false)} | ${a.startTime}</span>
+            <strong style="font-size: 14px;">${escapeHTML(a.title)}</strong>
+            <span style="font-size: 11px; color: var(--text-muted);">${formatVietnameseDate(a.date, false)} | ${escapeHTML(a.startTime)}</span>
           </div>
           <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
-            ${a.description || 'Không có mô tả'}
+            ${escapeHTML(a.description || 'Không có mô tả')}
           </div>
         </div>
       `).join('');
@@ -234,11 +235,11 @@ export class App {
       html += matchedNotes.map(n => `
         <div class="card search-item-note" data-id="${n.id}" style="padding: 10px 14px; cursor: pointer;">
           <div style="display: flex; justify-content: space-between;">
-            <strong style="font-size: 14px;">${n.title}</strong>
+            <strong style="font-size: 14px;">${escapeHTML(n.title)}</strong>
             <span style="font-size: 11px; color: var(--text-muted);">${formatVietnameseDate(n.date, false)}</span>
           </div>
           <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
-            ${(n.content || '').substr(0, 80)}...
+            ${escapeHTML((n.content || '').substr(0, 80))}...
           </div>
         </div>
       `).join('');

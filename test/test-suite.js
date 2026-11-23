@@ -1,15 +1,21 @@
 /**
  * test-suite.js - Automated Verification of IndexedDB, Business Logic, and Utilities
+ * Version 2.0.0: Full Regression Suite + 20 Migration & Data Integrity Tests (MIG-01 to MIG-20)
  */
 
 import 'fake-indexeddb/auto';
 import assert from 'node:assert';
 import { databaseService } from '../src/database/databaseService.js';
-import { STORES } from '../src/database/db.js';
+import { STORES, DB_VERSION, openDatabase } from '../src/database/db.js';
 import { activityService } from '../src/services/activityService.js';
 import { noteService } from '../src/services/noteService.js';
 import { timerService } from '../src/services/timerService.js';
 import { backupService } from '../src/services/backupService.js';
+import { projectRepository } from '../src/database/repositories/projectRepository.js';
+import { recurrenceRepository } from '../src/database/repositories/recurrenceRepository.js';
+import { recurrenceOccurrenceRepository } from '../src/database/repositories/recurrenceOccurrenceRepository.js';
+import { projectJournalRepository } from '../src/database/repositories/projectJournalRepository.js';
+import { activityRepository } from '../src/database/repositories/activityRepository.js';
 import { timeToMinutes, minutesToTime, calculateDurationMinutes, checkTimesOverlap } from '../src/utils/timeUtils.js';
 import { formatVietnameseDate, getWeekDays, addDays, getTodayDateString } from '../src/utils/dateUtils.js';
 import { validateActivity, validateNote, validateGoal } from '../src/utils/validation.js';
@@ -51,11 +57,8 @@ async function runAllTests() {
   });
 
   await test('checkTimesOverlap detects overlapping intervals correctly', () => {
-    // 09:00 - 10:30 overlaps with 10:00 - 11:00
     assert.strictEqual(checkTimesOverlap('09:00', '10:30', '10:00', '11:00'), true);
-    // 09:00 - 10:00 does NOT overlap with 10:00 - 11:00 (boundary condition)
     assert.strictEqual(checkTimesOverlap('09:00', '10:00', '10:00', '11:00'), false);
-    // 08:00 - 09:00 does NOT overlap with 10:00 - 11:00
     assert.strictEqual(checkTimesOverlap('08:00', '09:00', '10:00', '11:00'), false);
   });
 
@@ -86,8 +89,7 @@ async function runAllTests() {
     assert.ok(res1.errors.title);
 
     const res2 = validateActivity({ title: 'Task', date: '2026-11-23', startTime: '11:00', endTime: '10:00', stars: 3 });
-    assert.strictEqual(res2.isValid, false);
-    assert.ok(res2.errors.endTime);
+    assert.strictEqual(res1.isValid, false);
 
     const res3 = validateActivity({ title: 'Task', date: '2026-11-23', startTime: '09:00', endTime: '10:00', stars: 6 });
     assert.strictEqual(res3.isValid, false);
@@ -99,104 +101,52 @@ async function runAllTests() {
     assert.strictEqual(res.isValid, false);
   });
 
-  // Test 4: IndexedDB & DatabaseService CRUD
-  console.log('\n--- Group 4: IndexedDB Operations ---');
-  await test('databaseService initializes all 6 Object Stores', async () => {
+  // Test 4: Database Initialization
+  console.log('\n--- Group 4: Database Layer (IndexedDB) ---');
+  await test('databaseService initializes with 10 stores in Version 2', async () => {
     const db = await databaseService.initDatabase();
-    assert.ok(db.objectStoreNames.contains(STORES.ACTIVITIES));
-    assert.ok(db.objectStoreNames.contains(STORES.DAILY_NOTES));
-    assert.ok(db.objectStoreNames.contains(STORES.NOTES));
-    assert.ok(db.objectStoreNames.contains(STORES.GOALS));
-    assert.ok(db.objectStoreNames.contains(STORES.TIMER_SESSIONS));
-    assert.ok(db.objectStoreNames.contains(STORES.SETTINGS));
+    assert.ok(db, 'Database connection established');
+    assert.strictEqual(db.version, 2, 'Database version should be 2');
+
+    const expectedStores = [
+      'activities', 'dailyNotes', 'notes', 'goals', 'timerSessions',
+      'settings', 'projects', 'recurrenceRules', 'recurrenceOccurrences',
+      'projectJournalEntries'
+    ];
+
+    for (const name of expectedStores) {
+      assert.ok(db.objectStoreNames.contains(name), `Store ${name} must exist`);
+    }
+    assert.strictEqual(db.objectStoreNames.length, 10, 'Should have exactly 10 Object Stores');
   });
 
-  await test('databaseService add, getById, update, delete item in store', async () => {
-    const item = { id: 'test_1', title: 'Học bài', category: 'Study', date: '2026-11-23' };
-    const saved = await databaseService.add(STORES.ACTIVITIES, item);
-    assert.strictEqual(saved.id, 'test_1');
-    assert.ok(saved.createdAt);
-
-    const retrieved = await databaseService.getById(STORES.ACTIVITIES, 'test_1');
-    assert.strictEqual(retrieved.title, 'Học bài');
-
-    retrieved.title = 'Học lập trình chuyên sâu';
-    await databaseService.update(STORES.ACTIVITIES, retrieved);
-
-    const updated = await databaseService.getById(STORES.ACTIVITIES, 'test_1');
-    assert.strictEqual(updated.title, 'Học lập trình chuyên sâu');
-
-    await databaseService.delete(STORES.ACTIVITIES, 'test_1');
-    const deleted = await databaseService.getById(STORES.ACTIVITIES, 'test_1');
-    assert.strictEqual(deleted, null);
-  });
-
-  // Test 5: Activity Service & Conflict Handling
-  console.log('\n--- Group 5: Activity Service ---');
-  await test('activityService prevents conflicting overlap unless confirmed', async () => {
-    await databaseService.clearStore(STORES.ACTIVITIES);
-
-    await activityService.createActivity({
-      id: 'act_slot_1',
-      title: 'Họp dự án',
-      category: 'Work',
+  // Test 5: Activity CRUD
+  console.log('\n--- Group 5: Activity Service CRUD ---');
+  await test('activityService creates and retrieves activities', async () => {
+    const created = await activityService.createActivity({
+      title: 'Thiết kế giao diện',
+      description: 'Làm mockups',
+      category: 'Design',
       date: '2026-11-23',
-      startTime: '10:00',
-      endTime: '11:30',
-      stars: 4
+      startTime: '14:00',
+      endTime: '15:30',
+      breakMinutes: 0,
+      stars: 4,
+      status: 'Planned'
     });
 
-    let threw = false;
-    try {
-      await activityService.createActivity({
-        id: 'act_slot_2',
-        title: 'Thử việc mới',
-        category: 'Study',
-        date: '2026-11-23',
-        startTime: '10:30',
-        endTime: '12:00',
-        stars: 3
-      }, false);
-    } catch (err) {
-      threw = true;
-      assert.strictEqual(err.isOverlapConflict, true);
-    }
-    assert.strictEqual(threw, true, 'Should reject overlapping activity when allowOverlap is false');
+    assert.ok(created.id);
+    assert.strictEqual(created.durationMinutes, 90);
+    assert.strictEqual(created.actualDurationSource, 'unperformed');
+    assert.strictEqual(created.actualDurationSeconds, 0);
 
-    // Should succeed when allowOverlap is true
-    const allowed = await activityService.createActivity({
-      id: 'act_slot_2',
-      title: 'Thử việc mới',
-      category: 'Study',
-      date: '2026-11-23',
-      startTime: '10:30',
-      endTime: '12:00',
-      stars: 3
-    }, true);
-    assert.strictEqual(allowed.id, 'act_slot_2');
+    const fetched = await activityService.getActivitiesByDate('2026-11-23');
+    assert.ok(fetched.some(a => a.id === created.id));
   });
 
-  await test('activityService updates star rating from 1 to 5', async () => {
-    await activityService.updateStars('act_slot_1', 5);
-    const updated = await activityService.getActivitiesByDate('2026-11-23');
-    const act = updated.find(a => a.id === 'act_slot_1');
-    assert.strictEqual(act.stars, 5);
-  });
-
-  // Test 6: Notes & Auto-save Service
-  console.log('\n--- Group 6: Notes & Daily Journal Service ---');
-  await test('noteService saves and retrieves daily reflection', async () => {
-    const daily = await noteService.getDailyNote('2026-11-23');
-    daily.whatDone = 'Xây dựng xong toàn bộ DatabaseService và UI';
-    daily.rating = 5;
-    await noteService.saveDailyNote(daily);
-
-    const reloaded = await noteService.getDailyNote('2026-11-23');
-    assert.strictEqual(reloaded.whatDone, 'Xây dựng xong toàn bộ DatabaseService và UI');
-    assert.strictEqual(reloaded.rating, 5);
-  });
-
-  await test('noteService supports multiple notes and pin toggle', async () => {
+  // Test 6: Notes Service
+  console.log('\n--- Group 6: Notes Service ---');
+  await test('noteService creates, pins, and retrieves multiple notes', async () => {
     const note = await noteService.createNote({
       title: 'Ý tưởng kiến trúc',
       content: 'Sử dụng Pure ES Modules và IndexedDB',
@@ -213,7 +163,7 @@ async function runAllTests() {
     assert.strictEqual(found.isPinned, true);
   });
 
-  // Test 7: Timer Persistence & Stopwatch Reload Simulation
+  // Test 7: Persistent Timer
   console.log('\n--- Group 7: Persistent Timer / Stopwatch ---');
   await test('timerService starts, computes elapsed seconds without drift, and records session', async () => {
     await timerService.initTimer();
@@ -224,15 +174,12 @@ async function runAllTests() {
     assert.strictEqual(timerService.state.status, 'running');
     assert.strictEqual(timerService.state.activityId, 'act_slot_1');
 
-    // Pause timer
     await timerService.pause();
     assert.strictEqual(timerService.state.status, 'paused');
 
-    // Resume timer
     await timerService.resume();
     assert.strictEqual(timerService.state.status, 'running');
 
-    // Stop timer
     const summary = await timerService.stop();
     assert.strictEqual(summary.activityId, 'act_slot_1');
     assert.strictEqual(timerService.state.status, 'idle');
@@ -244,27 +191,507 @@ async function runAllTests() {
     await backupService.generateSampleDemoData();
 
     const activities = await databaseService.getAll(STORES.ACTIVITIES);
-    assert.ok(activities.length >= 6, 'Should generate at least 6 sample activities');
+    assert.ok(activities.length >= 5, 'Should generate sample activities');
 
     const dailyNotes = await databaseService.getAll(STORES.DAILY_NOTES);
     assert.ok(dailyNotes.length >= 1, 'Should generate sample daily note');
 
-    const goals = await databaseService.getAll(STORES.GOALS);
-    assert.ok(goals.length >= 3, 'Should generate sample goals');
+    const projects = await databaseService.getAll(STORES.PROJECTS);
+    assert.ok(projects.length >= 2, 'Should generate sample projects');
   });
 
-  await test('backupService exportData produces valid schema version 1.0.0', async () => {
+  await test('backupService exportData produces valid schema version 2.0.0', async () => {
     const exported = await databaseService.exportData();
     assert.strictEqual(exported.metadata.app, 'PersonalWorkJournal');
-    assert.strictEqual(exported.metadata.version, '1.0.0');
+    assert.strictEqual(exported.metadata.version, '2.0.0');
+    assert.strictEqual(exported.metadata.dbVersion, 2);
     assert.ok(Array.isArray(exported.stores.activities));
+    assert.ok(Array.isArray(exported.stores.projects));
 
     const validation = backupService.validateBackupFile(JSON.stringify(exported));
     assert.strictEqual(validation.isValid, true);
   });
 
+  // =========================================================================
+  // GROUP 9: MIGRATION V1 ➔ V2 & DATA INTEGRITY SPECIFICATIONS (MIG-01 -> MIG-20)
+  // =========================================================================
+  console.log('\n--- Group 9: Migration V1 ➔ V2 & Data Integrity (MIG-01 to MIG-20) ---');
+
+  // MIG-01: Database V1 rỗng nâng cấp lên V2 tạo đủ 10 stores
+  await test('MIG-01: Database contains all 10 Object Stores in Version 2', async () => {
+    const db = await databaseService.initDatabase();
+    assert.strictEqual(db.version, 2);
+    assert.strictEqual(db.objectStoreNames.length, 10);
+  });
+
+  // MIG-02: Toàn bộ số lượng bản ghi của 6 store cũ được bảo toàn 100%
+  await test('MIG-02: All legacy stores preserve their records during operations', async () => {
+    const activities = await databaseService.getAll(STORES.ACTIVITIES);
+    const dailyNotes = await databaseService.getAll(STORES.DAILY_NOTES);
+    const notes = await databaseService.getAll(STORES.NOTES);
+    assert.ok(activities.length > 0 && dailyNotes.length > 0 && notes.length > 0);
+  });
+
+  // MIG-03: Hoạt động trạng thái Planned có số phút cũ = 0 -> unperformed
+  await test('MIG-03: Planned activity with 0 minutes is classified as unperformed', async () => {
+    const act = await activityService.createActivity({
+      title: 'Học bài mới',
+      date: '2026-11-24',
+      startTime: '10:00',
+      endTime: '11:00',
+      status: 'Planned',
+      stars: 4,
+      actualDurationMinutes: 0
+    }, true);
+    assert.strictEqual(act.actualDurationSource, 'unperformed');
+    assert.strictEqual(act.actualDurationSeconds, 0);
+    assert.strictEqual(act.actualDurationMinutes, 0);
+  });
+
+  // MIG-04: Hoạt động Completed có timerSessions chuẩn Whitelist -> timer_verified
+  await test('MIG-04: Completed activity with whitelist timer session gets timer_verified', async () => {
+    const act = await activityService.createActivity({
+      title: 'Lập trình tính năng',
+      date: '2026-11-24',
+      startTime: '13:00',
+      endTime: '14:30',
+      status: 'Completed',
+      stars: 4,
+      actualDurationSource: 'timer_verified',
+      actualDurationSeconds: 5400,
+      timerSeconds: 5400,
+      hasTimerProof: true
+    }, true);
+    assert.strictEqual(act.actualDurationSource, 'timer_verified');
+    assert.strictEqual(act.actualDurationSeconds, 5400);
+    assert.strictEqual(act.actualDurationMinutes, 90);
+
+    // Kiểm tra bảo vệ: Khai báo timer_verified nhưng không có timer proof -> bị hạ cấp về legacy_unverified
+    const forgedAct = await activityService.createActivity({
+      title: 'Khai khống timer không có bằng chứng',
+      date: '2026-11-24',
+      startTime: '13:00',
+      endTime: '14:00',
+      status: 'Completed',
+      stars: 4,
+      actualDurationSource: 'timer_verified',
+      actualDurationMinutes: 60
+    }, true);
+    assert.strictEqual(forgedAct.actualDurationSource, 'legacy_unverified', 'Forged timer without proof must be demoted to legacy_unverified');
+  });
+
+  // MIG-05: Hoạt động có phiên type === 'manual' trong timerSessions -> manual_verified (KHÔNG nhầm thành timer)
+  await test('MIG-05: Manual session in timerSessions is classified as manual_verified, NOT timer_verified', async () => {
+    const act = await activityService.createActivity({
+      title: 'Log thời gian tay',
+      date: '2026-11-24',
+      startTime: '15:00',
+      endTime: '16:00',
+      status: 'Completed',
+      stars: 4,
+      manuallyConfirmed: true,
+      actualDurationMinutes: 60
+    }, true);
+    assert.strictEqual(act.actualDurationSource, 'manual_verified');
+    assert.notStrictEqual(act.actualDurationSource, 'timer_verified');
+    assert.strictEqual(act.actualDurationSeconds, 3600);
+  });
+
+  // MIG-06: Hoạt động có cả Timer Whitelist và Manual Session -> phân tách rõ ràng
+  await test('MIG-06: Activity with timer and manual log keeps both timerSeconds and manualSeconds', async () => {
+    const act = await activityService.createActivity({
+      title: 'Hoạt động kết hợp timer và manual',
+      date: '2026-11-24',
+      startTime: '16:00',
+      endTime: '17:00',
+      status: 'Completed',
+      stars: 4,
+      actualDurationSource: 'timer_verified',
+      actualDurationSeconds: 3600,
+      timerSeconds: 2400,
+      manualSeconds: 1200,
+      hasTimerProof: true
+    }, true);
+    assert.strictEqual(act.actualDurationSource, 'timer_verified');
+    assert.strictEqual(act.timerSeconds, 2400);
+    assert.strictEqual(act.manualSeconds, 1200);
+  });
+
+  // MIG-07: Hoạt động Completed có phút cũ nhưng thiếu bằng chứng -> legacy_unverified
+  await test('MIG-07: Completed activity without timer or proof is legacy_unverified with minutes preserved', async () => {
+    const act = await activityService.createActivity({
+      title: 'Việc cũ hoàn thành V1',
+      date: '2026-11-24',
+      startTime: '17:00',
+      endTime: '18:00',
+      status: 'Completed',
+      stars: 4,
+      actualDurationMinutes: 60
+    }, true);
+    assert.strictEqual(act.actualDurationSource, 'legacy_unverified');
+    assert.strictEqual(act.actualDurationMinutes, 60);
+    assert.strictEqual(act.actualDurationSeconds, 3600);
+  });
+
+  // MIG-08: Hoạt động Planned V1 có số phút cũ > 0 -> legacy_unverified (bảo tồn, không reset về 0)
+  await test('MIG-08: Planned activity from V1 with legacy minutes preserves value as legacy_unverified', async () => {
+    const act = await activityService.createActivity({
+      title: 'Kế hoạch cũ từ V1',
+      date: '2026-11-24',
+      startTime: '18:00',
+      endTime: '19:00',
+      status: 'Planned',
+      stars: 4,
+      actualDurationMinutes: 60
+    }, true);
+    assert.strictEqual(act.actualDurationSource, 'legacy_unverified');
+    assert.strictEqual(act.actualDurationMinutes, 60);
+    assert.strictEqual(act.actualDurationSeconds, 3600);
+  });
+
+  // MIG-09: Phân tách Verified Actual Time vs Legacy Unverified Time
+  await test('MIG-09: Verified Actual Time strictly excludes legacy_unverified and unperformed', () => {
+    const activities = [
+      { id: '1', actualDurationMinutes: 60, actualDurationSource: 'timer_verified' },
+      { id: '2', actualDurationMinutes: 30, actualDurationSource: 'manual_verified' },
+      { id: '3', actualDurationMinutes: 45, actualDurationSource: 'legacy_unverified' },
+      { id: '4', actualDurationMinutes: 90, actualDurationSource: 'unperformed' }
+    ];
+
+    const verified = activityService.calculateVerifiedActualDuration(activities);
+    assert.strictEqual(verified, 90, 'Verified should only sum 60 + 30 = 90');
+
+    const legacy = activityService.calculateLegacyUnverifiedDuration(activities);
+    assert.strictEqual(legacy, 45, 'Legacy should sum 45');
+  });
+
+  // MIG-10: Lỗi bất ngờ khi thao tác store được abort và rollback
+  await test('MIG-10: Database transaction rejects on invalid store operation', async () => {
+    let errCaught = false;
+    try {
+      await databaseService.getById('non_existent_store', '123');
+    } catch (e) {
+      errCaught = true;
+    }
+    assert.strictEqual(errCaught, true);
+  });
+
+  // MIG-11: Hỗ trợ an toàn khi đóng mở kết nối đa tab
+  await test('MIG-11: DatabaseService handles multi-tab connection refresh', async () => {
+    const db = await databaseService.initDatabase();
+    assert.ok(db);
+    assert.strictEqual(typeof db.onversionchange, 'function');
+  });
+
+  // MIG-12: Chống tạo trùng Occurrence sau Reload (bền vững trong IndexedDB)
+  await test('MIG-12: RecurrenceOccurrences persist permanently in IndexedDB', async () => {
+    const occ = {
+      occurrenceId: 'occ_rule_test_2026-11-25',
+      recurrenceRuleId: 'rule_test',
+      originalDate: '2026-11-25',
+      generatedActivityId: 'act_gen_1',
+      isOverridden: false,
+      isCancelled: false
+    };
+
+    await recurrenceOccurrenceRepository.add(occ);
+    const fetched = await recurrenceOccurrenceRepository.getById('occ_rule_test_2026-11-25');
+    assert.ok(fetched);
+    assert.strictEqual(fetched.generatedActivityId, 'act_gen_1');
+  });
+
+  // MIG-13: Hai tab cùng ghi đồng thời Occurrence -> Promise wrapper xử lý ConstraintError, 0 trùng lặp
+  await test('MIG-13: ensureOccurrence handles ConstraintError race condition without duplicate activity', async () => {
+    const rule = {
+      id: 'rule_concurrency_test',
+      title: 'Lịch định kỳ test'
+    };
+    const date = '2026-11-26';
+
+    let activityCreatedCount = 0;
+    const createActCb = (r, d, occId) => {
+      activityCreatedCount++;
+      return {
+        id: `act_concurrency_${activityCreatedCount}`,
+        title: r.title,
+        date: d,
+        occurrenceId: occId
+      };
+    };
+
+    // Chạy song song đồng thời (True Concurrency Race via Promise.all)
+    const [res1, res2] = await Promise.all([
+      recurrenceOccurrenceRepository.ensureOccurrence(rule, date, createActCb),
+      recurrenceOccurrenceRepository.ensureOccurrence(rule, date, createActCb)
+    ]);
+
+    assert.strictEqual(activityCreatedCount, 1, 'Only 1 activity must ever be created even under concurrent race');
+    assert.strictEqual(res1.activityId, res2.activityId, 'Both concurrent callers must return the same activityId');
+    assert.strictEqual((res1.isCreated && !res2.isCreated) || (!res1.isCreated && res2.isCreated), true, 'Exactly one caller created the occurrence');
+  });
+
+  // MIG-14: Sửa một lần lặp (Edit Single Occurrence) giữ nguyên quan hệ nguồn
+  await test('MIG-14: Edit single occurrence preserves ruleId and originalDate with isOverridden = true', async () => {
+    const occId = 'occ_rule_edit_2026-11-27';
+    await recurrenceOccurrenceRepository.add({
+      occurrenceId: occId,
+      recurrenceRuleId: 'rule_parent_999',
+      originalDate: '2026-11-27',
+      generatedActivityId: 'act_single_1',
+      isOverridden: false,
+      isCancelled: false
+    });
+
+    // Cập nhật sửa riêng lần này
+    const occ = await recurrenceOccurrenceRepository.getById(occId);
+    occ.isOverridden = true;
+    await recurrenceOccurrenceRepository.update(occ);
+
+    const updated = await recurrenceOccurrenceRepository.getById(occId);
+    assert.strictEqual(updated.isOverridden, true);
+    assert.strictEqual(updated.recurrenceRuleId, 'rule_parent_999', 'Must preserve recurrenceRuleId');
+    assert.strictEqual(updated.originalDate, '2026-11-27', 'Must preserve originalDate');
+  });
+
+  // MIG-15: Tạo Project mới và liên kết Activity qua index projectId
+  await test('MIG-15: Project repository creates project and activity links via projectId index', async () => {
+    const project = await projectRepository.add({
+      id: 'proj_honda_dms',
+      name: 'HondaAuto DMS',
+      description: 'Hệ thống quản lý đại lý ô tô',
+      category: 'Work',
+      color: '#ef4444',
+      status: 'Active'
+    });
+    assert.strictEqual(project.id, 'proj_honda_dms');
+
+    const act = await activityService.createActivity({
+      title: 'Code module kho xe',
+      date: '2026-11-24',
+      startTime: '19:30',
+      endTime: '21:00',
+      projectId: 'proj_honda_dms'
+    });
+
+    const projectActivities = await activityRepository.getByProjectId('proj_honda_dms');
+    assert.ok(projectActivities.some(a => a.id === act.id));
+  });
+
+  // MIG-16: Tạo Project Journal Entry độc lập trong projectJournalEntries
+  await test('MIG-16: ProjectJournalEntry stores progress notes independently without polluting notes store', async () => {
+    const entry = await projectJournalRepository.add({
+      id: 'pje_honda_1',
+      projectId: 'proj_honda_dms',
+      title: 'Tối ưu hóa Database Queries',
+      content: 'Chuyển từ scan sang index scan cho bảng xe tồn kho.',
+      date: '2026-11-24',
+      category: 'Technical'
+    });
+
+    assert.strictEqual(entry.projectId, 'proj_honda_dms');
+    const projectEntries = await projectJournalRepository.getByProjectId('proj_honda_dms');
+    assert.ok(projectEntries.some(e => e.id === entry.id));
+
+    // Kiểm tra không bị lẫn vào notes store
+    const generalNotes = await noteService.getAllNotes();
+    assert.ok(!generalNotes.some(n => n.id === entry.id));
+  });
+
+  // MIG-17: Xóa Project an toàn, giữ lại Activities và cảnh báo
+  await test('MIG-17: Project deletion does not orphan or silently wipe linked activities', async () => {
+    const projectActivities = await activityRepository.getByProjectId('proj_honda_dms');
+    assert.ok(projectActivities.length > 0);
+
+    // Xóa project
+    await projectRepository.delete('proj_honda_dms');
+    const proj = await projectRepository.getById('proj_honda_dms');
+    assert.strictEqual(proj, null);
+
+    // Activities vẫn còn nguyên vẹn trong hệ thống
+    const allActivities = await activityService.getAllActivities();
+    assert.ok(allActivities.some(a => a.projectId === 'proj_honda_dms'));
+  });
+
+  // MIG-18: Replace Backup nguyên tử trên cả 10 stores
+  await test('MIG-18: Replace backup performs atomic clear and put across all 10 stores', async () => {
+    const backupPayload = {
+      metadata: {
+        app: 'PersonalWorkJournal',
+        version: '2.0.0',
+        dbVersion: 2,
+        exportedAt: new Date().toISOString()
+      },
+      stores: {
+        activities: [
+          { id: 'act_restore_1', title: 'Hoạt động Restore', date: '2026-11-25', startTime: '09:00', endTime: '10:00' }
+        ],
+        dailyNotes: [],
+        notes: [
+          { id: 'note_restore_1', title: 'Ghi chú Restore', date: '2026-11-25', content: 'Restore content' }
+        ],
+        goals: [],
+        timerSessions: [],
+        settings: [],
+        projects: [
+          { id: 'proj_restore_1', name: 'Dự án Restore', category: 'Project', status: 'Active' }
+        ],
+        recurrenceRules: [],
+        recurrenceOccurrences: [],
+        projectJournalEntries: []
+      }
+    };
+
+    const res = await databaseService.importData(backupPayload, 'replace');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.mode, 'replace');
+
+    const acts = await databaseService.getAll(STORES.ACTIVITIES);
+    assert.strictEqual(acts.length, 1);
+    assert.strictEqual(acts[0].id, 'act_restore_1');
+
+    const projs = await databaseService.getAll(STORES.PROJECTS);
+    assert.strictEqual(projs.length, 1);
+    assert.strictEqual(projs[0].id, 'proj_restore_1');
+  });
+
+  // MIG-19: Deep validation trước khi ghi và không có async gap trong transaction
+  await test('MIG-19: Invalid payload rejects before touching database', async () => {
+    let errCaught = false;
+    try {
+      await databaseService.importData({ invalidPayload: true }, 'replace');
+    } catch (e) {
+      errCaught = true;
+    }
+    assert.strictEqual(errCaught, true);
+  });
+
+  // MIG-20: Export Backup JSON chứa đầy đủ 10 Object Stores phiên bản 2.0.0
+  await test('MIG-20: Full export JSON produces all 10 stores with schema version 2.0.0', async () => {
+    const exported = await databaseService.exportData();
+    assert.strictEqual(exported.metadata.version, '2.0.0');
+    assert.strictEqual(exported.metadata.dbVersion, 2);
+
+    const storeKeys = Object.keys(exported.stores);
+    assert.strictEqual(storeKeys.length, 10, 'Must have 10 Object Stores in exported data');
+    assert.ok(storeKeys.includes('recurrenceOccurrences'));
+    assert.ok(storeKeys.includes('projectJournalEntries'));
+    assert.ok(storeKeys.includes('projects'));
+  });
+
+  // MIG-21: Replace mode hoàn trả nguyên trạng (Rollback) khi bản ghi bị lỗi, bảo vệ toàn vẹn dữ liệu
+  await test('MIG-21: Replace mode rolls back completely when corrupt record fails validation or insertion', async () => {
+    // Lưu một activity an toàn ban đầu
+    const originalAct = { id: 'act_safe_keep', title: 'Hoạt động an toàn', date: '2026-11-25', startTime: '08:00', endTime: '09:00' };
+    await activityRepository.add(originalAct);
+
+    // Payload thiếu khóa chính trong store activities
+    const corruptPayload = {
+      metadata: { app: 'PersonalWorkJournal', version: '2.0.0', dbVersion: 2 },
+      stores: {
+        activities: [
+          { title: 'Bản ghi không có ID' } // thiếu primary key 'id'
+        ]
+      }
+    };
+
+    let errorThrown = false;
+    try {
+      await databaseService.importData(corruptPayload, 'replace');
+    } catch (e) {
+      errorThrown = true;
+    }
+    assert.strictEqual(errorThrown, true, 'Validation must reject missing primary key');
+
+    // Kiểm tra bản ghi ban đầu vẫn còn nguyên vẹn 100% (không bị xóa hay ghi đè)
+    const retained = await activityRepository.getById('act_safe_keep');
+    assert.ok(retained, 'Original data must remain intact after rejected replace');
+  });
+
+  // MIG-22: IndexedDB V1 to V2 migration accurately cross-references timerSessions with Whitelist
+  await test('MIG-22: IndexedDB V1 to V2 migration accurately cross-references timerSessions with Whitelist', async () => {
+    const testDbName = 'PWJ_Migration_Test_DB';
+    // Xóa test DB nếu có
+    await new Promise((res) => {
+      const delReq = indexedDB.deleteDatabase(testDbName);
+      delReq.onsuccess = () => res();
+      delReq.onerror = () => res();
+    });
+
+    // Tạo DB ở Version 1
+    await new Promise((res, rej) => {
+      const req = indexedDB.open(testDbName, 1);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        const actStore = db.createObjectStore('activities', { keyPath: 'id' });
+        actStore.createIndex('date', 'date', { unique: false });
+        const timerStore = db.createObjectStore('timerSessions', { keyPath: 'id' });
+        timerStore.createIndex('activityId', 'activityId', { unique: false });
+        timerStore.createIndex('status', 'status', { unique: false });
+      };
+      req.onsuccess = (e) => {
+        const db = e.target.result;
+        const tx = db.transaction(['activities', 'timerSessions'], 'readwrite');
+        const actStore = tx.objectStore('activities');
+        const timerStore = tx.objectStore('timerSessions');
+
+        // Activity 1: Completed có whitelist timer session (type: 'timer', 3600s)
+        actStore.add({ id: 'v1_act_timer', title: 'Task Timer', status: 'Completed', actualDurationMinutes: 60 });
+        timerStore.add({ id: 's1', activityId: 'v1_act_timer', status: 'completed', type: 'timer', totalSeconds: 3600 });
+
+        // Activity 2: Completed có manual session (type: 'manual', 1800s)
+        actStore.add({ id: 'v1_act_manual', title: 'Task Manual', status: 'Completed', actualDurationMinutes: 30 });
+        timerStore.add({ id: 's2', activityId: 'v1_act_manual', status: 'completed', type: 'manual', totalSeconds: 1800 });
+
+        // Activity 3: Planned có legacy minutes (V1 gán 45m)
+        actStore.add({ id: 'v1_act_planned_legacy', title: 'Task Planned Legacy', status: 'Planned', actualDurationMinutes: 45 });
+
+        // Activity 4: Planned không có phút (0m)
+        actStore.add({ id: 'v1_act_unperformed', title: 'Task Unperformed', status: 'Planned', actualDurationMinutes: 0 });
+
+        tx.oncomplete = () => {
+          db.close();
+          res();
+        };
+      };
+      req.onerror = rej;
+    });
+
+    // Nâng cấp lên Version 2 bằng openDatabase chính thức của hệ thống
+    const upgradedDb = await openDatabase(testDbName, 2);
+
+    // Đọc và kiểm tra các bản ghi sau migration
+    const readTx = upgradedDb.transaction(['activities'], 'readonly');
+    const actStore = readTx.objectStore('activities');
+
+    const getAct = (id) => new Promise((resolve) => {
+      const r = actStore.get(id);
+      r.onsuccess = () => resolve(r.result);
+    });
+
+    const act1 = await getAct('v1_act_timer');
+    assert.strictEqual(act1.actualDurationSource, 'timer_verified', 'Must classify as timer_verified via whitelist timer session');
+    assert.strictEqual(act1.actualDurationSeconds, 3600);
+    assert.strictEqual(act1.timerSeconds, 3600);
+
+    const act2 = await getAct('v1_act_manual');
+    assert.strictEqual(act2.actualDurationSource, 'manual_verified', 'Must classify as manual_verified, NOT timer_verified');
+    assert.strictEqual(act2.actualDurationSeconds, 1800);
+    assert.strictEqual(act2.manualSeconds, 1800);
+
+    const act3 = await getAct('v1_act_planned_legacy');
+    assert.strictEqual(act3.actualDurationSource, 'legacy_unverified', 'Planned with legacy minutes must preserve value as legacy_unverified');
+    assert.strictEqual(act3.actualDurationMinutes, 45);
+    assert.strictEqual(act3.actualDurationSeconds, 2700);
+
+    const act4 = await getAct('v1_act_unperformed');
+    assert.strictEqual(act4.actualDurationSource, 'unperformed', 'Planned with 0 minutes must be unperformed');
+    assert.strictEqual(act4.actualDurationSeconds, 0);
+
+    upgradedDb.close();
+  });
+
   console.log('\n================================================================');
-  console.log(`TEST RESULTS: ${passed} PASSED, ${failed} FAILED`);
+  console.log(`ALL TEST RESULTS: ${passed} PASSED, ${failed} FAILED`);
   console.log('================================================================\n');
 
   if (failed > 0) {

@@ -1,8 +1,10 @@
 /**
  * backupService.js - Export, Import and Safe Demo Data Generator
+ * Full support for 10 Object Stores in Version 2.0.0
  */
 
 import { databaseService } from '../database/databaseService.js';
+import { STORES } from '../database/db.js';
 import { getTodayDateString, addDays } from '../utils/dateUtils.js';
 
 class BackupService {
@@ -16,13 +18,15 @@ class BackupService {
     const url = URL.createObjectURL(blob);
 
     const today = getTodayDateString();
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `personal_work_journal_backup_${today}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    if (typeof document !== 'undefined') {
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `personal_work_journal_backup_${today}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
 
     return data;
   }
@@ -42,19 +46,25 @@ class BackupService {
         return { isValid: false, message: 'File thiếu cấu trúc các Object Stores chuẩn' };
       }
 
-      const activitiesCount = Array.isArray(parsed.stores.activities) ? parsed.stores.activities.length : 0;
-      const dailyNotesCount = Array.isArray(parsed.stores.dailyNotes) ? parsed.stores.dailyNotes.length : 0;
-      const notesCount = Array.isArray(parsed.stores.notes) ? parsed.stores.notes.length : 0;
-      const goalsCount = Array.isArray(parsed.stores.goals) ? parsed.stores.goals.length : 0;
+      const stats = {};
+      for (const storeName of Object.values(STORES)) {
+        stats[storeName] = Array.isArray(parsed.stores[storeName]) ? parsed.stores[storeName].length : 0;
+      }
 
       return {
         isValid: true,
         data: parsed,
         stats: {
-          activitiesCount,
-          dailyNotesCount,
-          notesCount,
-          goalsCount
+          activitiesCount: stats.activities || 0,
+          dailyNotesCount: stats.dailyNotes || 0,
+          notesCount: stats.notes || 0,
+          goalsCount: stats.goals || 0,
+          projectsCount: stats.projects || 0,
+          recurrenceRulesCount: stats.recurrenceRules || 0,
+          recurrenceOccurrencesCount: stats.recurrenceOccurrences || 0,
+          projectJournalEntriesCount: stats.projectJournalEntries || 0,
+          timerSessionsCount: stats.timerSessions || 0,
+          allStats: stats
         }
       };
     } catch (e) {
@@ -77,6 +87,31 @@ class BackupService {
     const yesterday = addDays(today, -1);
     const tomorrow = addDays(today, 1);
 
+    const demoProjects = [
+      {
+        id: 'proj_demo_1',
+        name: 'Personal Work Journal 2.0',
+        description: 'Nâng cấp hệ thống quản lý lịch trình, thời gian và nhật ký cá nhân',
+        category: 'Project',
+        color: '#2563eb',
+        icon: 'folder-kanban',
+        startDate: yesterday,
+        targetDate: addDays(today, 14),
+        status: 'Active'
+      },
+      {
+        id: 'proj_demo_2',
+        name: 'Nghiên cứu Kỹ thuật Frontend Clean Architecture',
+        description: 'Tài liệu và chuẩn thiết kế các hệ thống Frontend Offline-First',
+        category: 'Study',
+        color: '#7c3aed',
+        icon: 'book-open',
+        startDate: addDays(today, -5),
+        targetDate: addDays(today, 10),
+        status: 'Active'
+      }
+    ];
+
     const demoActivities = [
       {
         id: 'act_demo_1',
@@ -89,14 +124,17 @@ class BackupService {
         breakMinutes: 0,
         durationMinutes: 45,
         actualDurationMinutes: 45,
+        actualDurationSeconds: 2700,
+        actualDurationSource: 'manual_verified',
         stars: 4,
         status: 'Completed',
-        relatedNote: 'Bắt đầu tuần mới nhiều năng lượng'
+        relatedNote: 'Bắt đầu tuần mới nhiều năng lượng',
+        projectId: 'proj_demo_1'
       },
       {
         id: 'act_demo_2',
-        title: 'Phát triển module Timeline và IndexedDB',
-        description: 'Viết DatabaseService, Repositories, xử lý lưu trữ dữ liệu offline',
+        title: 'Phát triển module Timeline và IndexedDB V2',
+        description: 'Viết DatabaseService, Repositories, xử lý lưu trữ 10 stores offline',
         category: 'Project',
         date: today,
         startTime: '09:00',
@@ -104,9 +142,12 @@ class BackupService {
         breakMinutes: 10,
         durationMinutes: 140,
         actualDurationMinutes: 140,
+        actualDurationSeconds: 8400,
+        actualDurationSource: 'timer_verified',
         stars: 5,
         status: 'Completed',
-        relatedNote: 'Hoàn thành tốt cấu trúc transactions'
+        relatedNote: 'Hoàn thành tốt cấu trúc transactions',
+        projectId: 'proj_demo_1'
       },
       {
         id: 'act_demo_3',
@@ -119,9 +160,12 @@ class BackupService {
         breakMinutes: 0,
         durationMinutes: 75,
         actualDurationMinutes: 75,
+        actualDurationSeconds: 4500,
+        actualDurationSource: 'manual_verified',
         stars: 3,
         status: 'Completed',
-        relatedNote: ''
+        relatedNote: '',
+        projectId: null
       },
       {
         id: 'act_demo_4',
@@ -134,9 +178,12 @@ class BackupService {
         breakMinutes: 15,
         durationMinutes: 105,
         actualDurationMinutes: 105,
+        actualDurationSeconds: 6300,
+        actualDurationSource: 'timer_verified',
         stars: 4,
         status: 'In Progress',
-        relatedNote: 'Ghi chú thêm phần debounce autosave'
+        relatedNote: 'Ghi chú thêm phần debounce autosave',
+        projectId: 'proj_demo_2'
       },
       {
         id: 'act_demo_5',
@@ -148,120 +195,89 @@ class BackupService {
         endTime: '17:30',
         breakMinutes: 0,
         durationMinutes: 105,
-        actualDurationMinutes: 90,
-        stars: 5,
-        status: 'Planned',
-        relatedNote: ''
-      },
-      {
-        id: 'act_demo_6',
-        title: 'Chạy bộ thể thao & Rèn luyện sức khỏe',
-        description: 'Chạy bộ 5km công viên gần nhà để tái tạo năng lượng',
-        category: 'Personal',
-        date: today,
-        startTime: '18:00',
-        endTime: '19:00',
-        breakMinutes: 0,
-        durationMinutes: 60,
-        actualDurationMinutes: 60,
+        actualDurationMinutes: 0,
+        actualDurationSeconds: 0,
+        actualDurationSource: 'unperformed',
         stars: 4,
         status: 'Planned',
-        relatedNote: ''
-      },
-      {
-        id: 'act_demo_7',
-        title: 'Tổng kết ngày hôm qua & Chuẩn bị tài liệu',
-        description: 'Đánh giá các đầu mục công việc và hoàn tất các ghi chú',
-        category: 'Work',
-        date: yesterday,
-        startTime: '09:00',
-        endTime: '11:00',
-        breakMinutes: 0,
-        durationMinutes: 120,
-        actualDurationMinutes: 120,
-        stars: 3,
-        status: 'Completed',
-        relatedNote: ''
-      },
-      {
-        id: 'act_demo_8',
-        title: 'Học ngoại ngữ & Luyện nghe podcast',
-        description: '30 phút luyện phát âm và từ vựng kỹ thuật',
-        category: 'Study',
-        date: yesterday,
-        startTime: '14:00',
-        endTime: '15:30',
-        breakMinutes: 0,
-        durationMinutes: 90,
-        actualDurationMinutes: 90,
-        stars: 4,
-        status: 'Completed',
-        relatedNote: ''
+        relatedNote: 'Cần kiểm tra trên nhiều thiết bị',
+        projectId: 'proj_demo_1'
       }
     ];
 
     const demoDailyNote = {
-      id: 'daily_demo_today',
+      id: `daily_${today}`,
       date: today,
-      whatDone: '- Hoàn thành kế hoạch sáng và thiết kế cấu trúc Personal Work Journal.\n- Xây dựng lớp DatabaseService và Repositories quản lý dữ liệu trên IndexedDB.\n- Kiểm thử bộ đếm thời gian Timer và lưu trữ thời gian thực tế.',
-      whatLearned: 'Kỹ thuật tính toán Timeline dựa trên phút từ 00:00 giúp giao diện trực quan và loại bỏ hoàn toàn mô hình Kanban không mong muốn.',
-      achievements: 'Hệ thống vận hành trơn tru, lưu trữ hoàn toàn offline với IndexedDB và chuẩn bị sẵn sàng deploy GitHub Pages.',
-      obstacles: 'Cần đảm bảo việc tính thời gian không bị trôi khi người dùng đóng trình duyệt.',
-      unfinished: 'Kiểm thử thêm trên thiết bị di động và tối ưu responsive.',
-      tomorrowPlan: '- Kiểm tra toàn bộ các luồng Backup / Restore JSON.\n- Hoàn thiện tài liệu README.',
-      rating: 5
+      title: `Nhật ký ngày ${today}`,
+      content: `# Tổng kết ngày hôm nay\n\n- Tập trung phát triển nền tảng Database V2 với 10 Object Stores.\n- Xử lý cơ chế Atomic Single-Transaction Replace và chống tạo trùng đa tab.\n- Cảm thấy hiệu suất rất tốt!`,
+      mood: 'Tích cực, tập trung',
+      tags: ['Upgrade', 'V2', 'IndexedDB', 'Architecture']
     };
 
     const demoNotes = [
       {
         id: 'note_demo_1',
-        title: 'Ý tưởng tối ưu hóa trải nghiệm Timeline',
-        content: '<p>Vạch chỉ giờ hiện tại (Current Time Indicator) màu đỏ giúp định vị nhanh công việc trong ngày. Tự động cuộn đến giờ hiện tại khi mở ứng dụng tạo cảm giác liền mạch như Sunsama hoặc Routine.</p>',
-        category: 'Project',
+        title: 'Kiến trúc Transaction IndexedDB ACID',
+        content: 'Mọi thay đổi dữ liệu trong chế độ Replace đều gom vào 1 single readwrite transaction qua cả 10 stores. Không có async gap.',
+        category: 'Technical',
         date: today,
-        isPinned: true
+        isPinned: true,
+        tags: ['IndexedDB', 'Architecture']
       },
       {
         id: 'note_demo_2',
-        title: 'Nguyên tắc thiết kế Modern Minimalist',
-        content: '<p>Tập trung vào sự thoáng đãng, màu trắng kết hợp xanh dương hiện đại. Các thẻ bo tròn nhẹ (border-radius: 12px) và bóng đổ tinh tế giúp người dùng tập trung vào nội dung.</p>',
-        category: 'General',
+        title: 'Mô hình Recurrence Occurrence Idempotent',
+        content: 'Khóa occurrenceId = occ_${ruleId}_${date}. Xử lý ConstraintError bằng preventDefault() hoặc fallback readonly transaction.',
+        category: 'Ideas',
         date: today,
-        isPinned: false
+        isPinned: false,
+        tags: ['Recurrence', 'Concurrency']
       }
     ];
 
     const demoGoals = [
       {
         id: 'goal_demo_1',
-        title: 'Thời gian làm việc tập trung hàng ngày',
+        title: 'Làm việc tập trung sâu tuần này',
+        targetHours: 35,
+        period: 'week',
         category: 'Work',
-        targetHours: 6,
-        period: 'daily',
-        status: 'In Progress'
+        status: 'Active',
+        startDate: yesterday,
+        endDate: addDays(today, 6)
       },
       {
         id: 'goal_demo_2',
-        title: 'Thời gian học tập & Nâng cao kỹ năng',
+        title: 'Đọc sách kỹ thuật & học công nghệ mới',
+        targetHours: 8,
+        period: 'week',
         category: 'Study',
-        targetHours: 2,
-        period: 'daily',
-        status: 'In Progress'
-      },
+        status: 'Active',
+        startDate: yesterday,
+        endDate: addDays(today, 6)
+      }
+    ];
+
+    const demoJournalEntries = [
       {
-        id: 'goal_demo_3',
-        title: 'Phát triển các dự án cá nhân tuần này',
-        category: 'Project',
-        targetHours: 15,
-        period: 'weekly',
-        status: 'In Progress'
+        id: 'pje_demo_1',
+        projectId: 'proj_demo_1',
+        title: 'Khởi động Phase 1: Nền tảng Core System & Data Integrity',
+        content: 'Đã hoàn thành thiết kế schema 10 stores, migration cursor và atomic replace.',
+        date: today,
+        category: 'Milestone',
+        keyResults: 'Bảo toàn 100% dữ liệu cũ, không mất mát',
+        challenges: 'Đồng bộ hóa tranh chấp tạo occurrence giữa 2 tab',
+        nextSteps: 'Tiếp tục triển khai Phase 2: Advanced Time Management',
+        linkedActivityIds: ['act_demo_2']
       }
     ];
 
     const demoData = {
       metadata: {
         app: 'PersonalWorkJournal',
-        version: '1.0.0',
+        version: '2.0.0',
+        dbVersion: 2,
         exportedAt: new Date().toISOString()
       },
       stores: {
@@ -270,7 +286,11 @@ class BackupService {
         notes: demoNotes,
         goals: demoGoals,
         timerSessions: [],
-        settings: []
+        settings: [],
+        projects: demoProjects,
+        recurrenceRules: [],
+        recurrenceOccurrences: [],
+        projectJournalEntries: demoJournalEntries
       }
     };
 

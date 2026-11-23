@@ -2,7 +2,8 @@
 > **Tài liệu kiểm toán toàn diện mã nguồn, nhánh Git, cơ sở dữ liệu và bảo mật**  
 > **Dự án:** Personal Work Journal  
 > **Phiên bản hiện tại:** 1.0.0 | **Mục tiêu nâng cấp:** 2.0.0  
-> **Thời điểm kiểm toán:** 23/11/2026
+> **Nhánh phát triển & kiểm toán:** `master` (Đồng bộ với production workflow)  
+> **Thời điểm kiểm toán:** 23/11/2026 (Cập nhật hoàn thiện sau rà soát cuối cùng)
 
 ---
 
@@ -11,81 +12,79 @@
 ### 1. Hiện trạng Git Remote & Local
 - **Repository Remote:** `https://github.com/AhNguyeen/Personal-Work-Journal.git`
 - **Remote HEAD:** Trỏ vào `origin/master`.
-- **Nhánh `master` trên remote:** Commit `16362bc` (*Merge pull request #1 from AhNguyeen/main*).
-- **Nhánh `main` trên remote:** Commit `63a239a` (*fix(deploy): configure canonical base path and restrict deployment trigger to main branch*).
-- **So sánh mã nguồn giữa `origin/main` và `origin/master`:**
-  - Lệnh `git diff origin/main origin/master` cho kết quả **0 khác biệt** (Cây mã nguồn của hai nhánh hiện tại hoàn toàn đồng nhất 100%).
-- **Trạng thái GitHub Pages Deployment:**
-  - Nhánh `main`: **Active & Deployment thành công** tại `https://ahnguyeen.github.io/Personal-Work-Journal/`.
-  - Nhánh `master`: Từng gặp lỗi deployment trước đây khi GitHub Actions cố gắng deploy vào environment `github-pages` nhưng bị giới hạn bởi quyền hạn nhánh môi trường.
-
-### 2. Đề xuất quy chuẩn nhánh chính thức
-- **Nhánh chính thức phát triển và triển khai:** **`main`**.
-  - Lý do: GitHub Pages Environment trên repo đã cấu hình gán quyền trực tiếp cho nhánh `main`. Workflow [.github/workflows/deploy.yml](file:///d:/VS%20Code/Personal-Work-Journal/.github/workflows/deploy.yml) hiện đã chuẩn hóa lắng nghe sự kiện push trên nhánh `main`.
-- **Quy trình an toàn cho đợt nâng cấp 2.0:**
-  - Tạo nhánh phát triển tính năng riêng: `feature/personal-work-journal-2.0`.
-  - Toàn bộ quá trình phát triển, kiểm thử V1->V2 migration và regression test sẽ được thực hiện trên nhánh tính năng.
-  - Tuyệt đối không xóa branch, không force push, không ghi đè lịch sử Git.
-  - Chỉ tạo PR và merge vào `main` khi toàn bộ 100% test cases đã pass.
+- **Nhánh `master`:** Nhánh bắt buộc thực hiện kiểm toán và lưu trữ toàn bộ các tài liệu đặc tả kiến trúc.
+- **Nhánh `main`:** Nhánh triển khai GitHub Pages (`https://ahnguyeen.github.io/Personal-Work-Journal/`).
+- **Nguyên tắc an toàn:**
+  - Tuyệt đối không tự ý sửa đổi source code trong quá trình hoàn thiện tài liệu.
+  - Không thay đổi cấu trúc dữ liệu IndexedDB thực tế trên trình duyệt.
+  - Không deploy lên môi trường production khi chưa có phê duyệt chính thức.
+  - Không chuyển nội dung sang `main` trong phiên làm việc này.
+  - Không force push, không xóa nhánh, bảo toàn toàn vẹn lịch sử Git.
 
 ---
 
 ## II. ĐÁNH GIÁ KIẾN TRÚC HIỆN TẠI (ARCHITECTURE AUDIT)
 
 ### 1. Tầng lưu trữ (IndexedDB & DatabaseService)
-- **Database:** `PersonalWorkJournalDB` (Version 1).
-- **6 Object Stores hiện tại:**
+- **Database hiện tại:** `PersonalWorkJournalDB` (Version 1).
+- **6 Object Stores hiện tại của V1:**
   1. `activities` (keyPath: `id`, indexes: `date`, `category`, `status`, `stars`, `createdAt`).
   2. `dailyNotes` (keyPath: `id`, indexes: `date` [unique], `createdAt`).
   3. `notes` (keyPath: `id`, indexes: `date`, `category`, `isPinned`, `createdAt`).
   4. `goals` (keyPath: `id`, indexes: `category`, `period`, `status`, `createdAt`).
   5. `timerSessions` (keyPath: `id`, indexes: `activityId`, `status`, `startTime`, `createdAt`).
   6. `settings` (keyPath: `key`).
-- **Điểm mạnh:**
-  - Tập trung mọi thao tác qua `databaseService.js` và `repositories/`.
-  - Không có mã truy vấn IndexedDB phân tán trong UI components.
-  - Sử dụng transaction hoàn chỉnh (`readwrite` / `readonly`).
-- **Vấn đề phát hiện (P0/P1):**
-  - **Lỗi bẫy Promise trong `initDatabase()`:** Thuộc tính `this._initPromise` lưu giữ Promise kết nối. Nếu kết nối bị lỗi hoặc bị abort một lần, `this._initPromise` bị giữ ở trạng thái rejected vĩnh viễn, ngăn cản các lần thử kết nối lại của người dùng.
+- **Mở rộng lên 10 Object Stores trong V2:**
+  - Bổ sung 4 Object Stores mới:
+    7. `projects` (keyPath: `id`, indexes: `status`, `category`, `createdAt`).
+    8. `recurrenceRules` (keyPath: `id`, indexes: `recurrenceType`, `startDate`, `createdAt`).
+    9. `recurrenceOccurrences` (keyPath: `occurrenceId`, indexes: `recurrenceRuleId`, `originalDate`, `generatedActivityId`, `isOverridden`, `isCancelled`, `createdAt`). *Lưu ý tối ưu: Không tạo index `occurrenceId` vì trường này đã là `keyPath` mang ràng buộc duy nhất.*
+    10. `projectJournalEntries` (keyPath: `id`, indexes: `projectId`, `date`, `createdAt`).
+- **Các lỗ hổng & rủi ro phát hiện trong V1 (P0/P1):**
+  - **Lỗi bẫy Promise trong `initDatabase()`:** Thuộc tính `this._initPromise` lưu giữ Promise kết nối. Nếu kết nối bị lỗi hoặc bị abort một lần, `this._initPromise` bị giữ ở trạng thái rejected vĩnh viễn, ngăn cản các lần thử kết nối lại của người dùng. Cần reset `this._initPromise = null` trong khối `.catch()`.
   - **Thiếu lắng nghe sự kiện `onblocked` và `onclose`:** Khi mở nhiều tab hoặc trong quá trình nâng cấp version, thiếu handler `onblocked` có thể khiến kết nối bị treo.
-  - **Transaction an toàn trong `importData()`:** Trong chế độ `replace`, các store bị `clearStore()` trước khi xác thực sâu từng bản ghi của file import. Nếu một store ở giữa bị lỗi dữ liệu, dữ liệu cũ đã bị xóa một phần.
+  - **Rủi ro mất dữ liệu trong `importData()` (Replace Mode):**
+    - Trong chế độ `replace`, các store hiện bị `clearStore()` theo các transaction rời rạc trước khi import. Nếu xảy ra lỗi giữa chừng, dữ liệu cũ đã bị xóa dở dang mà không thể khôi phục tự động.
+    - **Yêu cầu kiểm toán:** Toàn bộ thao tác `clear` và `import` của **CẢ 10 OBJECT STORES** bắt buộc phải nằm trong **CÙNG MỘT TRANSACTION READWRITE DUY NHẤT**.
+    - **Rủi ro Auto-Commit do Async Gap:** Nếu có thao tác bất đồng bộ (`await`, `setTimeout`) trong transaction, transaction sẽ tự động commit và đóng trước khi ghi xong. Toàn bộ validation và chuẩn bị dữ liệu phải hoàn tất 100% trước khi mở transaction.
+    - **Giới hạn của Snapshot trong RAM:** Bản chụp bộ nhớ RAM chỉ là lớp hỗ trợ ở tầng ứng dụng, không thể bảo đảm phục hồi nếu tab trình duyệt bị crash hoặc tiến trình bị tắt đột ngột. Cơ chế rollback cốt lõi phải dựa vào IndexedDB Transaction Rollback.
 
-### 2. Tầng nghiệp vụ (Service Layer) & Tính toán thời gian
-- **`activityService.js`:**
-  - **Vấn đề sai lệch Actual Duration:** Khi tạo mới hoạt động, thuộc tính `actualDurationMinutes` đang được gán mặc định bằng `durationMinutes` (thời gian dự kiến):
-    ```javascript
-    actualDurationMinutes: Number(rawData.actualDurationMinutes) || durationMinutes
-    ```
-    Điều này khiến một hoạt động mới lên lịch (`Planned`) nhưng thống kê đã coi như đã hoàn thành số phút đó, làm sai lệch báo cáo hiệu suất (Planned vs Actual).
-  - **Giải pháp:** Tách biệt rõ ràng:
-    - `durationMinutes`: Thời lượng dự kiến lên lịch.
-    - `actualDurationSeconds`: Số giây thực tế tích lũy từ Timer hoặc nhập thủ công (mặc định = 0 khi mới tạo).
-    - `actualDurationMinutes`: Thuộc tính phái sinh tương thích ngược.
-- **`timerService.js`:**
-  - Hoạt động ổn định, lưu trữ `startTimestamp` và `accumulatedSeconds` vào `settings` để chống trôi thời gian khi F5/reload.
-  - Cần nâng cấp để hỗ trợ chế độ Pomodoro (Focus / Short Break / Long Break) và tích hợp liên kết Dự án (`projectId`).
+### 2. Tầng nghiệp vụ & Whitelist phân biệt Timer thực tế vs Nhập tay (Actual Duration Provenance)
+- **Kiểm toán phân loại nguồn thời gian thực tế bằng Whitelist:**
+  1. **`timer_verified` (Ưu tiên 1):** Bắt buộc sử dụng Whitelist tường minh:
+     ```javascript
+     session.status === 'completed' && (session.type === 'timer' || session.type === 'pomodoro') && session.totalSeconds > 0
+     ```
+     **Tuyệt đối không dùng phủ định `type !== 'manual'`** để tránh nhận nhầm các bản ghi thiếu `type` hoặc có giá trị rác.
+  2. **`manual_verified` (Ưu tiên 2):** Bao gồm:
+     - Các phiên hoàn tất trong `timerSessions` có **`type === 'manual'`** (người dùng tự log tay). **Quy định nghiêm ngặt: Phiên `manual` trong `timerSessions` tuyệt đối không được phân loại nhầm thành `timer_verified`.**
+     - Hoặc Activity có cờ bằng chứng xác nhận thủ công (`manuallyConfirmed === true`, `manualEntry === true`, `source === 'manual'`).
+     - Tuyệt đối không nhận diện chỉ qua điều kiện `actualDurationMinutes !== durationMinutes`.
+  3. **`legacy_unverified` (Ưu tiên 3):** Dữ liệu V1 cũ có `actualDurationMinutes > 0` nhưng không rõ bằng chứng nguồn.
+     - **Bảo toàn dữ liệu lịch sử:** Đối với Activity V1 trạng thái `Planned` có số phút cũ, bắt buộc giữ nguyên giá trị lịch sử (không xóa, không reset về 0), gán `actualDurationSeconds = actualDurationMinutes * 60` và gắn nhãn `legacy_unverified`.
+     - **Tách bạch tính toán:** Dữ liệu `legacy_unverified` **tuyệt đối KHÔNG được tính chung** vào `Verified Actual Time`. Tách riêng thành chỉ số "Thời gian ước tính cũ / Chưa xác minh" (Unverified Legacy Time) trong báo cáo.
+  4. **`unperformed` (Ưu tiên 4):** Hoạt động `Planned` và `actualDurationMinutes === 0` (hoặc rỗng), thời gian thực tế = 0.
+- **Xử lý hoạt động có cả 2 loại phiên:** Nếu vừa có phiên `timer` / `pomodoro` vừa có phiên `manual`, gán nhãn chính `timer_verified` nhưng lưu metadata bóc tách chi tiết `timerSeconds` và `manualSeconds` để báo cáo nguồn minh bạch.
 
-### 3. Bảo mật (Security & XSS Audit)
+### 3. Kiểm toán Lịch lặp lại & Xử lý `ConstraintError` bằng Promise Wrapper hợp lệ
+- **Scope giao dịch nguyên tử:** Việc kiểm tra và tạo Occurrence cùng Activity bắt buộc phải thực hiện trong một transaction `readwrite` bao gồm cả `recurrenceOccurrences` và `activities`.
+- **Vấn đề kỹ thuật với `ConstraintError`:**
+  - Khi dùng `occStore.add()`, nếu khóa `occurrenceId` đã tồn tại (do tab khác vừa tạo), request sẽ ném lỗi `ConstraintError`.
+  - Mặc định, lỗi này sẽ nổi bọt và **khiến transaction tự động bị abort**. Khi transaction đã abort thì không thể tiếp tục dùng chính transaction đó để đọc dữ liệu.
+  - `store.get()` trả về `IDBRequest`, không phải là `Promise` để `await` trực tiếp. Lệnh `return` trong callback `tx.onabort` không trả được kết quả về cho hàm gọi ngoài.
+- **Giải pháp kiểm toán chuẩn mực (Promise Wrapper):**
+  - Toàn bộ thao tác `ensureOccurrence` được bọc trong một `Promise`:
+    - **Phương án 1 (Chính thức):** Bắt sự kiện `onerror` tại request `add()`, gọi `event.preventDefault()` và `event.stopPropagation()` để ngăn lỗi nổi bọt lên transaction, sau đó đọc lại bản ghi bằng `occStore.get(occurrenceId)` qua callback `onsuccess` ngay trong transaction còn sống và gọi `resolve()` trả về `generatedActivityId`.
+    - **Phương án 2 (Dự phòng chuẩn mực):** Nếu transaction bị abort, bắt `tx.onabort`, mở transaction `readonly` MỚI, đọc lại bản ghi qua `readReq.onsuccess`, và gọi `resolve()` trả về `generatedActivityId` đã được tab thắng commit bền vững trên đĩa.
+  - Cả hai cách đều bảo đảm **tuyệt đối không tạo Activity trùng lặp giữa hai tab**, không làm crash ứng dụng và trả kết quả chính xác về hàm gọi ngoài.
+- **Quy tắc Edit Single Occurrence:**
+  - Giữ nguyên `recurrenceRuleId`, `originalDate`, `generatedActivityId` trong `recurrenceOccurrences` và cập nhật `isOverridden = true`.
+  - Activity cập nhật thông tin riêng, giữ nguyên liên kết `recurrenceRuleId`, `occurrenceId` và đánh dấu `isOccurrenceOverridden: true`.
+
+### 4. Kiểm toán Bảo mật (Security & XSS Audit)
 - **`src/app.js` (Global Search):**
-  - Trong phương thức `_handleGlobalSearch()`, kết quả tìm kiếm được nối trực tiếp vào chuỗi HTML thông qua template literal:
-    ```javascript
-    <strong style="font-size: 14px;">${a.title}</strong>
-    <div style="font-size: 12px;">${a.description || 'Không có mô tả'}</div>
-    ...
-    <div style="font-size: 12px;">${(n.content || '').substr(0, 80)}...</div>
-    ```
-  - **Rủi ro XSS:** Nếu người dùng nhập hoặc import dữ liệu có chứa `<img src=x onerror=alert(1)>` hoặc `<script>`, mã độc có thể được thực thi khi hiển thị kết quả tìm kiếm.
-  - **Giải pháp:** Bắt buộc áp dụng `escapeHTML()` (đã có trong `src/utils/formatters.js`) cho mọi trường văn bản trước khi đưa vào template hoặc dùng phương thức tạo DOM / `textContent`.
-
-### 4. Giao diện (UI/UX & Routing)
-- **Triết lý sản phẩm:** Duy trì tuyệt đối **Daily Schedule Timeline (24h)** và **Daily Journal**. Hoàn toàn không có Kanban Board, không có cột trạng thái kéo thả.
-- **Khả năng mở rộng:** Sidebar hiện có 10 mục. Việc bổ sung `Projects` và `Focus Mode` cần được tích hợp hài hòa, không tạo menu lồng nhau phức tạp.
-- **Chủ đề hiển thị:** Hiện mới chỉ có Light Theme; cần bổ sung Dark Theme và System Theme theo chuẩn CSS Custom Properties hiện có.
-
-### 5. Khả năng hỗ trợ PWA & Offline
-- Chưa có Web App Manifest (`manifest.webmanifest`).
-- Chưa có Service Worker (`sw.js`) để cache App Shell khi mất mạng.
-- Cần đảm bảo `start_url` và `scope` trong manifest khớp chính xác với subpath `/Personal-Work-Journal/`.
+  - Kết quả tìm kiếm hiện nối chuỗi trực tiếp vào `innerHTML` mà chưa escape HTML.
+  - Bắt buộc áp dụng `escapeHTML()` cho toàn bộ các trường hiển thị (`title`, `description`, `content`) để ngăn ngừa tấn công XSS.
 
 ---
 
@@ -95,32 +94,51 @@
 | :--- | :--- | :--- | :---: | :--- |
 | **SEC-01** | Global Search | XSS qua nội dung tìm kiếm chưa escape HTML | **P0 - Critical** | Áp dụng `escapeHTML` cho tất cả thuộc tính hiển thị |
 | **DATA-01** | IndexedDB | `_initPromise` bị kẹt khi lỗi, thiếu `onblocked`/`onclose` | **P0 - Critical** | Reset promise trong `.catch()`, thêm handler `onblocked` |
-| **DATA-02** | Activity Service | `actualDurationMinutes` tự gán bằng `durationMinutes` | **P0 - Critical** | Chuẩn hóa `actualDurationSeconds` = 0 cho task mới |
-| **DATA-03** | Backup/Restore | Import thiếu validation schema từng store & rollback | **P1 - High** | Validate cấu trúc sâu trước khi ghi, tạo backup tạm |
-| **FEAT-01** | Recurrence | Chưa có lịch lặp lại (hằng ngày, theo thứ, tháng) | **P1 - High** | Thêm Object Store `recurrenceRules`, sinh lịch theo khoảng |
-| **FEAT-02** | Project Journal | Chưa có hồ sơ quản lý dự án và nhật ký dự án | **P1 - High** | Thêm Object Store `projects`, liên kết `projectId` |
+| **DATA-02** | Activity Service | `actualDurationMinutes` tự gán bằng `durationMinutes` | **P0 - Critical** | Chuẩn hóa `actualDurationSeconds` và phân loại 4 nguồn dữ liệu |
+| **DATA-03** | Actual Provenance | Điều kiện Timer lỏng lẻo (`!== 'manual'`), nhầm lẫn manual log | **P0 - Critical** | Dùng whitelist `timer` \|\| `pomodoro`, bảo toàn lịch sử Planned cũ |
+| **DATA-04** | Backup/Restore | Nguy cơ mất dữ liệu do chia nhỏ transaction & async gap | **P1 - High** | Validate trước, 1 transaction readwrite qua 10 stores, không async gap |
+| **DATA-05** | Recurrence Store | Lỗi `ConstraintError` gây abort transaction & sai sót Promise return | **P1 - High** | Thiết kế Promise Wrapper chuẩn mực, xử lý `preventDefault` và fallback |
+| **FEAT-01** | Recurrence Rules | Chưa có quy tắc lịch lặp lại (daily, weekly, custom) | **P1 - High** | Thêm Object Store `recurrenceRules` và mô hình quan hệ nguồn bền vững |
+| **FEAT-02** | Project Journal | Chưa có hồ sơ dự án và nhật ký tiến độ dự án riêng | **P1 - High** | Thêm Object Store `projects` và `projectJournalEntries` độc lập |
 | **FEAT-03** | Advanced Time | Chưa có Focus Mode riêng và Pomodoro Timer | **P1 - High** | Nâng cấp `timerService` hỗ trợ Pomodoro & Focus Screen |
-| **PWA-01** | PWA & Offline | Chưa có Manifest, Service Worker và App Shell cache | **P2 - Medium** | Tạo `manifest.webmanifest`, `sw.js`, tích hợp đăng ký |
+| **PWA-01** | PWA & Offline | Chưa có Manifest, Service Worker và App Shell cache | **P2 - Medium** | Tạo `manifest.webmanifest`, `sw.js`, tích hợp đăng ký an toàn |
 | **UI-01** | Personalization | Chưa có Dark Theme và tùy biến màu sắc/thời gian | **P2 - Medium** | Bổ sung theme switcher và lưu cấu hình vào `settings` |
 
 ---
 
-## IV. MA TRẬN TÁC ĐỘNG TỆP (IMPACT ANALYSIS)
+## IV. MA TRẬN PHÂN ĐỊNH 5 TẦNG KIẾN TRÚC TRONG GIAI ĐOẠN 1
 
-| Tệp tin | Trạng thái | Nội dung tác động |
-| :--- | :---: | :--- |
-| `src/database/db.js` | Chỉnh sửa | Nâng `DB_VERSION = 2`, tạo store `projects`, `recurrenceRules`, thêm indexes |
-| `src/database/databaseService.js` | Chỉnh sửa | Sửa `_initPromise`, thêm `onblocked`, tăng cường giao dịch an toàn |
-| `src/database/repositories/projectRepository.js` | **Tạo mới** | Repository quản lý Project CRUD |
-| `src/database/repositories/recurrenceRepository.js` | **Tạo mới** | Repository quản lý Recurrence Rules |
-| `src/services/activityService.js` | Chỉnh sửa | Chuẩn hóa `actualDurationSeconds`, liên kết `projectId` & `recurrenceRuleId` |
-| `src/services/timerService.js` | Chỉnh sửa | Tích hợp chu trình Pomodoro (Focus/Break) & gắn `projectId` |
-| `src/services/projectService.js` | **Tạo mới** | Nghiệp vụ dự án, tính tổng thời gian, tiến độ và nhật ký dự án |
-| `src/services/recurrenceService.js` | **Tạo mới** | Tính toán các lần xuất hiện của lịch lặp |
-| `src/services/backupService.js` | Chỉnh sửa | Thêm stores mới vào backup, thẩm định schema sâu |
-| `src/pages/Projects/ProjectsPage.js` | **Tạo mới** | Màn hình quản lý dự án và Project Timeline / Journal |
-| `src/pages/Focus/FocusPage.js` | **Tạo mới** | Màn hình Focus Mode & Pomodoro tối giản |
-| `src/app.js` | Chỉnh sửa | Vá XSS Search, đăng ký routes `projects`, `focusMode` |
-| `src/components/Sidebar.js` | Chỉnh sửa | Thêm mục `Projects` và `Focus Mode` |
-| `public/manifest.webmanifest` | **Tạo mới** | Web App Manifest cấu hình chuẩn GitHub Pages |
-| `public/sw.js` | **Tạo mới** | Service Worker quản lý offline cache an toàn |
+| Tầng kiến trúc | Vai trò | Phạm vi triển khai trong Giai đoạn 1 |
+| :--- | :--- | :---: |
+| **Database Schema** | Tạo 10 Object Stores, cấu hình indexes chuẩn (bỏ index trùng keyPath), cursor migration V1 ➔ V2 an toàn | **HOÀN THÀNH 100% TRONG GĐ 1** |
+| **Repository** | Cung cấp CRUD nguyên tử cơ bản cho 10 stores độc lập | **HOÀN THÀNH 100% TRONG GĐ 1** |
+| **Service Layer** | Business logic: tính occurrence window, pomodoro cycles, project progress | *Thuộc Giai đoạn 2 và 3* |
+| **Business Logic** | Điều phối luồng dữ liệu liên service, state toàn cục | *Thuộc Giai đoạn 2 và 3* |
+| **UI Components** | Giao diện Timeline, Modal, Widgets, Focus Page, Projects Page | *Thuộc Giai đoạn 2, 3, 4* |
+
+> **Cam kết:** Giai đoạn 1 chỉ bàn giao Tầng Database Schema và Tầng Repository nền tảng cho 10 Object Stores, cùng với việc vá lỗi an ninh và bảo toàn dữ liệu. Không báo cáo tính năng Lịch lặp hoặc Hồ sơ dự án đã hoàn thành khi Tầng Service và Tầng UI chưa hoàn thiện.
+
+---
+
+## V. MA TRẬN TÁC ĐỘNG TỆP CHI TIẾT (CHO TOÀN BỘ DỰ ÁN 2.0)
+
+| Tệp tin | Trạng thái | Tầng kiến trúc | Nội dung tác động |
+| :--- | :---: | :---: | :--- |
+| `src/database/db.js` | Chỉnh sửa | Database Schema | Nâng `DB_VERSION = 2`, tạo đủ 10 Object Stores, bỏ index thừa keyPath, cursor migration |
+| `src/database/databaseService.js` | Chỉnh sửa | Database Core | Sửa `_initPromise`, thêm `onblocked`, hỗ trợ single-transaction replace qua 10 stores không async gap |
+| `src/database/repositories/projectRepository.js` | **Tạo mới** | Repository | Repository CRUD cho Object Store `projects` |
+| `src/database/repositories/recurrenceRepository.js` | **Tạo mới** | Repository | Repository CRUD cho Object Store `recurrenceRules` |
+| `src/database/repositories/recurrenceOccurrenceRepository.js` | **Tạo mới** | Repository | Repository CRUD cho Object Store `recurrenceOccurrences` |
+| `src/database/repositories/projectJournalRepository.js` | **Tạo mới** | Repository | Repository CRUD cho Object Store `projectJournalEntries` |
+| `src/services/activityService.js` | Chỉnh sửa | Service | Chuẩn hóa `actualDurationSeconds`, liên kết `projectId` & `recurrenceRuleId`, whitelist timer vs manual |
+| `src/services/timerService.js` | Chỉnh sửa | Service | Hỗ trợ chu trình Pomodoro & liên kết dự án `projectId` |
+| `src/services/projectService.js` | **Tạo mới** | Service | Nghiệp vụ dự án, tính tổng thời gian, tiến độ và nhật ký dự án |
+| `src/services/recurrenceService.js` | **Tạo mới** | Service | Promise Wrapper xử lý `ConstraintError` bằng preventDefault và transaction fallback |
+| `src/services/backupService.js` | Chỉnh sửa | Service | Hỗ trợ đầy đủ 10 Object Stores vào file backup JSON, thẩm định schema sâu và atomic replace |
+| `src/pages/Projects/ProjectsPage.js` | **Tạo mới** | UI | Màn hình quản lý dự án, Project Timeline và Project Journal Entries |
+| `src/pages/Focus/FocusPage.js` | **Tạo mới** | UI | Màn hình Focus Mode & Pomodoro tối giản |
+| `src/app.js` | Chỉnh sửa | UI & Security | Vá XSS Search, đăng ký routes `projects`, `focusMode` |
+| `src/components/Sidebar.js` | Chỉnh sửa | UI | Thêm mục `Projects` và `Focus Mode` |
+| `public/manifest.webmanifest` | **Tạo mới** | PWA | Web App Manifest cấu hình chuẩn GitHub Pages |
+| `public/sw.js` | **Tạo mới** | PWA | Service Worker quản lý offline cache an toàn |
+| `test/test-suite.js` | Chỉnh sửa | Testing | Mở rộng bổ sung 20 kịch bản test migration, whitelist timer, multi-tab và nghiệp vụ V2 |
