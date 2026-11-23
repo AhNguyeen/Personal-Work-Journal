@@ -6,7 +6,7 @@
 import 'fake-indexeddb/auto';
 import assert from 'node:assert';
 import { databaseService } from '../src/database/databaseService.js';
-import { STORES, DB_VERSION } from '../src/database/db.js';
+import { STORES, DB_VERSION, openDatabase } from '../src/database/db.js';
 import { activityService } from '../src/services/activityService.js';
 import { noteService } from '../src/services/noteService.js';
 import { timerService } from '../src/services/timerService.js';
@@ -258,11 +258,26 @@ async function runAllTests() {
       status: 'Completed',
       stars: 4,
       actualDurationSource: 'timer_verified',
-      actualDurationSeconds: 5400
+      actualDurationSeconds: 5400,
+      timerSeconds: 5400,
+      hasTimerProof: true
     }, true);
     assert.strictEqual(act.actualDurationSource, 'timer_verified');
     assert.strictEqual(act.actualDurationSeconds, 5400);
     assert.strictEqual(act.actualDurationMinutes, 90);
+
+    // Kiểm tra bảo vệ: Khai báo timer_verified nhưng không có timer proof -> bị hạ cấp về legacy_unverified
+    const forgedAct = await activityService.createActivity({
+      title: 'Khai khống timer không có bằng chứng',
+      date: '2026-11-24',
+      startTime: '13:00',
+      endTime: '14:00',
+      status: 'Completed',
+      stars: 4,
+      actualDurationSource: 'timer_verified',
+      actualDurationMinutes: 60
+    }, true);
+    assert.strictEqual(forgedAct.actualDurationSource, 'legacy_unverified', 'Forged timer without proof must be demoted to legacy_unverified');
   });
 
   // MIG-05: Hoạt động có phiên type === 'manual' trong timerSessions -> manual_verified (KHÔNG nhầm thành timer)
@@ -292,9 +307,14 @@ async function runAllTests() {
       status: 'Completed',
       stars: 4,
       actualDurationSource: 'timer_verified',
-      actualDurationSeconds: 3600
+      actualDurationSeconds: 3600,
+      timerSeconds: 2400,
+      manualSeconds: 1200,
+      hasTimerProof: true
     }, true);
     assert.strictEqual(act.actualDurationSource, 'timer_verified');
+    assert.strictEqual(act.timerSeconds, 2400);
+    assert.strictEqual(act.manualSeconds, 1200);
   });
 
   // MIG-07: Hoạt động Completed có phút cũ nhưng thiếu bằng chứng -> legacy_unverified
@@ -399,15 +419,15 @@ async function runAllTests() {
       };
     };
 
-    // Tab 1 tạo trước
-    const res1 = await recurrenceOccurrenceRepository.ensureOccurrence(rule, date, createActCb);
-    assert.strictEqual(res1.isCreated, true);
+    // Chạy song song đồng thời (True Concurrency Race via Promise.all)
+    const [res1, res2] = await Promise.all([
+      recurrenceOccurrenceRepository.ensureOccurrence(rule, date, createActCb),
+      recurrenceOccurrenceRepository.ensureOccurrence(rule, date, createActCb)
+    ]);
 
-    // Tab 2 cố gắng tạo lại cùng occurrenceId
-    const res2 = await recurrenceOccurrenceRepository.ensureOccurrence(rule, date, createActCb);
-    assert.strictEqual(res2.isCreated, false);
-    assert.strictEqual(res2.activityId, res1.activityId, 'Tab 2 must reuse activityId from Tab 1');
-    assert.strictEqual(activityCreatedCount, 1, 'Only 1 activity must ever be created');
+    assert.strictEqual(activityCreatedCount, 1, 'Only 1 activity must ever be created even under concurrent race');
+    assert.strictEqual(res1.activityId, res2.activityId, 'Both concurrent callers must return the same activityId');
+    assert.strictEqual((res1.isCreated && !res2.isCreated) || (!res1.isCreated && res2.isCreated), true, 'Exactly one caller created the occurrence');
   });
 
   // MIG-14: Sửa một lần lặp (Edit Single Occurrence) giữ nguyên quan hệ nguồn
@@ -556,6 +576,118 @@ async function runAllTests() {
     assert.ok(storeKeys.includes('recurrenceOccurrences'));
     assert.ok(storeKeys.includes('projectJournalEntries'));
     assert.ok(storeKeys.includes('projects'));
+  });
+
+  // MIG-21: Replace mode hoàn trả nguyên trạng (Rollback) khi bản ghi bị lỗi, bảo vệ toàn vẹn dữ liệu
+  await test('MIG-21: Replace mode rolls back completely when corrupt record fails validation or insertion', async () => {
+    // Lưu một activity an toàn ban đầu
+    const originalAct = { id: 'act_safe_keep', title: 'Hoạt động an toàn', date: '2026-11-25', startTime: '08:00', endTime: '09:00' };
+    await activityRepository.add(originalAct);
+
+    // Payload thiếu khóa chính trong store activities
+    const corruptPayload = {
+      metadata: { app: 'PersonalWorkJournal', version: '2.0.0', dbVersion: 2 },
+      stores: {
+        activities: [
+          { title: 'Bản ghi không có ID' } // thiếu primary key 'id'
+        ]
+      }
+    };
+
+    let errorThrown = false;
+    try {
+      await databaseService.importData(corruptPayload, 'replace');
+    } catch (e) {
+      errorThrown = true;
+    }
+    assert.strictEqual(errorThrown, true, 'Validation must reject missing primary key');
+
+    // Kiểm tra bản ghi ban đầu vẫn còn nguyên vẹn 100% (không bị xóa hay ghi đè)
+    const retained = await activityRepository.getById('act_safe_keep');
+    assert.ok(retained, 'Original data must remain intact after rejected replace');
+  });
+
+  // MIG-22: IndexedDB V1 to V2 migration accurately cross-references timerSessions with Whitelist
+  await test('MIG-22: IndexedDB V1 to V2 migration accurately cross-references timerSessions with Whitelist', async () => {
+    const testDbName = 'PWJ_Migration_Test_DB';
+    // Xóa test DB nếu có
+    await new Promise((res) => {
+      const delReq = indexedDB.deleteDatabase(testDbName);
+      delReq.onsuccess = () => res();
+      delReq.onerror = () => res();
+    });
+
+    // Tạo DB ở Version 1
+    await new Promise((res, rej) => {
+      const req = indexedDB.open(testDbName, 1);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        const actStore = db.createObjectStore('activities', { keyPath: 'id' });
+        actStore.createIndex('date', 'date', { unique: false });
+        const timerStore = db.createObjectStore('timerSessions', { keyPath: 'id' });
+        timerStore.createIndex('activityId', 'activityId', { unique: false });
+        timerStore.createIndex('status', 'status', { unique: false });
+      };
+      req.onsuccess = (e) => {
+        const db = e.target.result;
+        const tx = db.transaction(['activities', 'timerSessions'], 'readwrite');
+        const actStore = tx.objectStore('activities');
+        const timerStore = tx.objectStore('timerSessions');
+
+        // Activity 1: Completed có whitelist timer session (type: 'timer', 3600s)
+        actStore.add({ id: 'v1_act_timer', title: 'Task Timer', status: 'Completed', actualDurationMinutes: 60 });
+        timerStore.add({ id: 's1', activityId: 'v1_act_timer', status: 'completed', type: 'timer', totalSeconds: 3600 });
+
+        // Activity 2: Completed có manual session (type: 'manual', 1800s)
+        actStore.add({ id: 'v1_act_manual', title: 'Task Manual', status: 'Completed', actualDurationMinutes: 30 });
+        timerStore.add({ id: 's2', activityId: 'v1_act_manual', status: 'completed', type: 'manual', totalSeconds: 1800 });
+
+        // Activity 3: Planned có legacy minutes (V1 gán 45m)
+        actStore.add({ id: 'v1_act_planned_legacy', title: 'Task Planned Legacy', status: 'Planned', actualDurationMinutes: 45 });
+
+        // Activity 4: Planned không có phút (0m)
+        actStore.add({ id: 'v1_act_unperformed', title: 'Task Unperformed', status: 'Planned', actualDurationMinutes: 0 });
+
+        tx.oncomplete = () => {
+          db.close();
+          res();
+        };
+      };
+      req.onerror = rej;
+    });
+
+    // Nâng cấp lên Version 2 bằng openDatabase chính thức của hệ thống
+    const upgradedDb = await openDatabase(testDbName, 2);
+
+    // Đọc và kiểm tra các bản ghi sau migration
+    const readTx = upgradedDb.transaction(['activities'], 'readonly');
+    const actStore = readTx.objectStore('activities');
+
+    const getAct = (id) => new Promise((resolve) => {
+      const r = actStore.get(id);
+      r.onsuccess = () => resolve(r.result);
+    });
+
+    const act1 = await getAct('v1_act_timer');
+    assert.strictEqual(act1.actualDurationSource, 'timer_verified', 'Must classify as timer_verified via whitelist timer session');
+    assert.strictEqual(act1.actualDurationSeconds, 3600);
+    assert.strictEqual(act1.timerSeconds, 3600);
+
+    const act2 = await getAct('v1_act_manual');
+    assert.strictEqual(act2.actualDurationSource, 'manual_verified', 'Must classify as manual_verified, NOT timer_verified');
+    assert.strictEqual(act2.actualDurationSeconds, 1800);
+    assert.strictEqual(act2.manualSeconds, 1800);
+
+    const act3 = await getAct('v1_act_planned_legacy');
+    assert.strictEqual(act3.actualDurationSource, 'legacy_unverified', 'Planned with legacy minutes must preserve value as legacy_unverified');
+    assert.strictEqual(act3.actualDurationMinutes, 45);
+    assert.strictEqual(act3.actualDurationSeconds, 2700);
+
+    const act4 = await getAct('v1_act_unperformed');
+    assert.strictEqual(act4.actualDurationSource, 'unperformed', 'Planned with 0 minutes must be unperformed');
+    assert.strictEqual(act4.actualDurationSeconds, 0);
+
+    upgradedDb.close();
   });
 
   console.log('\n================================================================');

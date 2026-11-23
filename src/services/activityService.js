@@ -53,60 +53,173 @@ class ActivityService {
   }
 
   /**
-   * Helper to resolve actual duration and provenance source
+   * Helper to resolve actual duration and provenance source with strict whitelist and proof verification
    * @private
    */
   _resolveDurationAndProvenance(rawData, durationMinutes) {
     const status = rawData.status || 'Planned';
     const isCompleted = status === 'Completed';
 
-    // Đã có nguồn chỉ định trước
-    if (rawData.actualDurationSource) {
-      const seconds = rawData.actualDurationSeconds !== undefined
-        ? Number(rawData.actualDurationSeconds)
-        : (Number(rawData.actualDurationMinutes) || 0) * 60;
-      return {
-        actualDurationSeconds: seconds,
-        actualDurationMinutes: Math.round(seconds / 60),
-        actualDurationSource: rawData.actualDurationSource
-      };
-    }
+    // Bằng chứng Timer thực tế (type === 'timer' || 'pomodoro')
+    const timerSeconds = Number(rawData.timerSeconds) || 0;
+    const hasTimerProof = timerSeconds > 0 || rawData.hasTimerProof === true || rawData.isTimerLogged === true;
 
     // Bằng chứng nhập tay chủ động
-    const hasManualProof = rawData.manuallyConfirmed === true || rawData.manualEntry === true || rawData.source === 'manual';
+    const manualSeconds = Number(rawData.manualSeconds) || 0;
+    const hasManualProof = manualSeconds > 0 ||
+      rawData.manuallyConfirmed === true ||
+      rawData.manualEntry === true ||
+      rawData.source === 'manual';
 
-    if (hasManualProof) {
-      const mins = Number(rawData.actualDurationMinutes) || durationMinutes;
+    // 1. Nếu rawData có khai báo actualDurationSource -> BẮT BUỘC xác thực bằng chứng
+    if (rawData.actualDurationSource) {
+      const declared = rawData.actualDurationSource;
+      const declaredSecs = rawData.actualDurationSeconds !== undefined
+        ? Number(rawData.actualDurationSeconds)
+        : (Number(rawData.actualDurationMinutes) || 0) * 60;
+
+      if (declared === 'timer_verified') {
+        // Chỉ chấp nhận timer_verified khi có bằng chứng timer thực tế
+        if (hasTimerProof) {
+          const tSecs = timerSeconds > 0 ? timerSeconds : declaredSecs;
+          const totalSecs = tSecs + manualSeconds;
+          return {
+            actualDurationSeconds: totalSecs,
+            actualDurationMinutes: Math.round(totalSecs / 60),
+            actualDurationSource: 'timer_verified',
+            timerSeconds: tSecs,
+            manualSeconds
+          };
+        }
+        // Không có bằng chứng timer -> kiểm tra manual proof
+        if (hasManualProof) {
+          const mSecs = manualSeconds > 0 ? manualSeconds : declaredSecs;
+          return {
+            actualDurationSeconds: mSecs,
+            actualDurationMinutes: Math.round(mSecs / 60),
+            actualDurationSource: 'manual_verified',
+            timerSeconds: 0,
+            manualSeconds: mSecs
+          };
+        }
+        // Khai khống hoặc không rõ nguồn nhưng có số phút/giây -> hạ cấp về legacy_unverified
+        if (declaredSecs > 0) {
+          return {
+            actualDurationSeconds: declaredSecs,
+            actualDurationMinutes: Math.round(declaredSecs / 60),
+            actualDurationSource: 'legacy_unverified',
+            timerSeconds: 0,
+            manualSeconds: 0
+          };
+        }
+        return {
+          actualDurationSeconds: 0,
+          actualDurationMinutes: 0,
+          actualDurationSource: 'unperformed',
+          timerSeconds: 0,
+          manualSeconds: 0
+        };
+      }
+
+      if (declared === 'manual_verified') {
+        if (hasManualProof || declaredSecs > 0) {
+          const mSecs = manualSeconds > 0 ? manualSeconds : declaredSecs;
+          return {
+            actualDurationSeconds: mSecs,
+            actualDurationMinutes: Math.round(mSecs / 60),
+            actualDurationSource: hasManualProof ? 'manual_verified' : 'legacy_unverified',
+            timerSeconds: 0,
+            manualSeconds: hasManualProof ? mSecs : 0
+          };
+        }
+        return {
+          actualDurationSeconds: 0,
+          actualDurationMinutes: 0,
+          actualDurationSource: 'unperformed',
+          timerSeconds: 0,
+          manualSeconds: 0
+        };
+      }
+
+      if (declared === 'legacy_unverified') {
+        return {
+          actualDurationSeconds: declaredSecs,
+          actualDurationMinutes: Math.round(declaredSecs / 60),
+          actualDurationSource: declaredSecs > 0 ? 'legacy_unverified' : 'unperformed',
+          timerSeconds: 0,
+          manualSeconds: 0
+        };
+      }
+
+      if (declared === 'unperformed') {
+        return {
+          actualDurationSeconds: 0,
+          actualDurationMinutes: 0,
+          actualDurationSource: 'unperformed',
+          timerSeconds: 0,
+          manualSeconds: 0
+        };
+      }
+    }
+
+    // 2. Không chỉ định trước source -> đánh giá theo thứ tự ưu tiên
+    // Ưu tiên 1: Có bằng chứng timer
+    if (hasTimerProof) {
+      const tSecs = timerSeconds > 0 ? timerSeconds : (Number(rawData.actualDurationSeconds) || 0);
+      const totalSecs = tSecs + manualSeconds;
       return {
-        actualDurationSeconds: mins * 60,
-        actualDurationMinutes: mins,
-        actualDurationSource: 'manual_verified'
+        actualDurationSeconds: totalSecs,
+        actualDurationMinutes: Math.round(totalSecs / 60),
+        actualDurationSource: 'timer_verified',
+        timerSeconds: tSecs,
+        manualSeconds
       };
     }
 
+    // Ưu tiên 2: Có bằng chứng manual nhập tay
+    if (hasManualProof) {
+      const mins = Number(rawData.actualDurationMinutes) || durationMinutes;
+      const mSecs = manualSeconds > 0 ? manualSeconds : mins * 60;
+      return {
+        actualDurationSeconds: mSecs,
+        actualDurationMinutes: Math.round(mSecs / 60),
+        actualDurationSource: 'manual_verified',
+        timerSeconds: 0,
+        manualSeconds: mSecs
+      };
+    }
+
+    // Ưu tiên 3: Completed có phút cũ nhưng không có bằng chứng
     if (isCompleted) {
       const mins = Number(rawData.actualDurationMinutes) || durationMinutes;
       return {
         actualDurationSeconds: mins * 60,
         actualDurationMinutes: mins,
-        actualDurationSource: 'legacy_unverified'
+        actualDurationSource: 'legacy_unverified',
+        timerSeconds: 0,
+        manualSeconds: 0
       };
     }
 
-    // Nếu là Planned và không có phút nhập trước
+    // Ưu tiên 3 (tiếp): Planned có phút cũ > 0 từ V1 (bảo toàn lịch sử)
     const plannedMins = Number(rawData.actualDurationMinutes) || 0;
     if (plannedMins > 0) {
       return {
         actualDurationSeconds: plannedMins * 60,
         actualDurationMinutes: plannedMins,
-        actualDurationSource: 'legacy_unverified'
+        actualDurationSource: 'legacy_unverified',
+        timerSeconds: 0,
+        manualSeconds: 0
       };
     }
 
+    // Ưu tiên 4: Chưa thực hiện
     return {
       actualDurationSeconds: 0,
       actualDurationMinutes: 0,
-      actualDurationSource: 'unperformed'
+      actualDurationSource: 'unperformed',
+      timerSeconds: 0,
+      manualSeconds: 0
     };
   }
 
@@ -142,8 +255,13 @@ class ActivityService {
       rawData.breakMinutes || 0
     );
 
-    const { actualDurationSeconds, actualDurationMinutes, actualDurationSource } =
-      this._resolveDurationAndProvenance(rawData, durationMinutes);
+    const {
+      actualDurationSeconds,
+      actualDurationMinutes,
+      actualDurationSource,
+      timerSeconds,
+      manualSeconds
+    } = this._resolveDurationAndProvenance(rawData, durationMinutes);
 
     const newActivity = {
       id: rawData.id || generateId('act'),
@@ -163,7 +281,9 @@ class ActivityService {
       isOccurrenceOverridden: rawData.isOccurrenceOverridden || false,
       actualDurationMinutes,
       actualDurationSeconds,
-      actualDurationSource
+      actualDurationSource,
+      timerSeconds: timerSeconds || 0,
+      manualSeconds: manualSeconds || 0
     };
 
     const saved = await activityRepository.add(newActivity);
@@ -205,8 +325,13 @@ class ActivityService {
       rawData.breakMinutes || 0
     );
 
-    const { actualDurationSeconds, actualDurationMinutes, actualDurationSource } =
-      this._resolveDurationAndProvenance(rawData, durationMinutes);
+    const {
+      actualDurationSeconds,
+      actualDurationMinutes,
+      actualDurationSource,
+      timerSeconds,
+      manualSeconds
+    } = this._resolveDurationAndProvenance(rawData, durationMinutes);
 
     const updated = {
       ...existing,
@@ -226,7 +351,9 @@ class ActivityService {
       isOccurrenceOverridden: rawData.isOccurrenceOverridden !== undefined ? rawData.isOccurrenceOverridden : existing.isOccurrenceOverridden || false,
       actualDurationMinutes,
       actualDurationSeconds,
-      actualDurationSource
+      actualDurationSource,
+      timerSeconds: timerSeconds !== undefined ? timerSeconds : (existing.timerSeconds || 0),
+      manualSeconds: manualSeconds !== undefined ? manualSeconds : (existing.manualSeconds || 0)
     };
 
     const saved = await activityRepository.update(updated);

@@ -207,7 +207,7 @@ export class App {
     if (matchedActivities.length === 0 && matchedNotes.length === 0) {
       resultsContainer.innerHTML = `
         <div style="text-align: center; padding: 32px; color: var(--text-muted);">
-          Không tìm thấy hoạt động hoặc ghi chú nào phù hợp với từ khóa "${keyword}".
+          Không tìm thấy hoạt động hoặc ghi chú nào phù hợp với từ khóa "${escapeHTML(keyword)}".
         </div>
       `;
       return;

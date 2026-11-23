@@ -22,11 +22,13 @@ export const STORES = {
 
 /**
  * Open and initialize IndexedDB with required Object Stores and Indexes
+ * @param {string} [dbName=DB_NAME]
+ * @param {number} [version=DB_VERSION]
  * @returns {Promise<IDBDatabase>}
  */
-export function openDatabase() {
+export function openDatabase(dbName = DB_NAME, version = DB_VERSION) {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const request = indexedDB.open(dbName, version);
 
     request.onupgradeneeded = (event) => {
       const db = event.target.result;
@@ -157,51 +159,103 @@ export function openDatabase() {
         }
 
         // ==========================================================
-        // 4. MIGRATION DỮ LIỆU CŨ: ACTUAL DURATION PROVENANCE & SECONDS
+        // 4. MIGRATION DỮ LIỆU CŨ: CROSS-REFERENCE TIMER SESSIONS & ACTUAL DURATION PROVENANCE
         // ==========================================================
-        const cursorRequest = activityStore.openCursor();
-        cursorRequest.onsuccess = (e) => {
-          const cursor = e.target.result;
-          if (cursor) {
-            const a = cursor.value;
+        if (oldVersion > 0) {
+          const migrateActivitiesWithTimerMap = (timerMap) => {
+            const cursorRequest = activityStore.openCursor();
+            cursorRequest.onsuccess = (e) => {
+              const cursor = e.target.result;
+              if (cursor) {
+                const a = cursor.value;
 
-            // Đảm bảo các trường mở rộng không bị undefined
-            if (a.projectId === undefined) a.projectId = null;
-            if (a.recurrenceRuleId === undefined) a.recurrenceRuleId = null;
+                // Đảm bảo các trường mở rộng không bị undefined
+                if (a.projectId === undefined) a.projectId = null;
+                if (a.recurrenceRuleId === undefined) a.recurrenceRuleId = null;
 
-            // Xử lý Actual Duration Provenance theo thứ tự ưu tiên nghiêm ngặt
-            const legacyMinutes = Number(a.actualDurationMinutes);
-            const hasLegacyMinutes = !isNaN(legacyMinutes) && legacyMinutes > 0;
+                // Lấy đối soát dữ liệu timer sessions
+                const timerEntry = timerMap ? timerMap.get(a.id) : null;
+                const legacyMinutes = Number(a.actualDurationMinutes);
+                const hasLegacyMinutes = !isNaN(legacyMinutes) && legacyMinutes > 0;
+                const hasManualProof = a.manuallyConfirmed === true || a.manualEntry === true || a.source === 'manual';
 
-            // Bằng chứng nhập tay chủ động
-            const hasManualProof = a.manuallyConfirmed === true || a.manualEntry === true || a.source === 'manual';
+                if (timerEntry && timerEntry.hasTimer) {
+                  // Ưu tiên 1: timer_verified từ Whitelist timer sessions
+                  a.actualDurationSource = 'timer_verified';
+                  a.timerSeconds = timerEntry.timerSeconds;
+                  a.manualSeconds = timerEntry.manualSeconds;
+                  a.actualDurationSeconds = timerEntry.timerSeconds + timerEntry.manualSeconds;
+                  a.actualDurationMinutes = Math.round(a.actualDurationSeconds / 60);
+                } else if ((timerEntry && timerEntry.hasManual) || hasManualProof) {
+                  // Ưu tiên 2: manual_verified từ manual session hoặc cờ xác nhận tay
+                  a.actualDurationSource = 'manual_verified';
+                  const manualSecs = (timerEntry && timerEntry.hasManual)
+                    ? timerEntry.manualSeconds
+                    : (hasLegacyMinutes ? legacyMinutes * 60 : 0);
+                  a.timerSeconds = 0;
+                  a.manualSeconds = manualSecs;
+                  a.actualDurationSeconds = manualSecs;
+                  a.actualDurationMinutes = Math.round(manualSecs / 60);
+                } else if (hasLegacyMinutes) {
+                  // Ưu tiên 3: legacy_unverified (bao gồm cả Planned và Completed có số phút cũ từ V1)
+                  // TUYỆT ĐỐI KHÔNG XÓA HOẶC RESET VỀ 0 LÀM MẤT DỮ LIỆU LỊCH SỬ
+                  a.actualDurationSource = 'legacy_unverified';
+                  a.actualDurationMinutes = legacyMinutes;
+                  a.actualDurationSeconds = legacyMinutes * 60;
+                  a.timerSeconds = 0;
+                  a.manualSeconds = 0;
+                } else {
+                  // Ưu tiên 4: unperformed (chưa thực hiện, thời gian = 0)
+                  a.actualDurationSource = 'unperformed';
+                  a.actualDurationMinutes = 0;
+                  a.actualDurationSeconds = 0;
+                  a.timerSeconds = 0;
+                  a.manualSeconds = 0;
+                }
 
-            if (a.actualDurationSource) {
-              // Đã có nguồn phân loại hợp lệ từ trước -> giữ nguyên
-              if (a.actualDurationSeconds === undefined) {
-                a.actualDurationSeconds = (Number(a.actualDurationMinutes) || 0) * 60;
+                cursor.update(a);
+                cursor.continue();
               }
-            } else if (hasManualProof) {
-              // Ưu tiên 2 (khi không có timer session trực tiếp): manual_verified
-              a.actualDurationSource = 'manual_verified';
-              a.actualDurationSeconds = (Number(a.actualDurationMinutes) || 0) * 60;
-            } else if (hasLegacyMinutes) {
-              // Ưu tiên 3: legacy_unverified (bao gồm cả Planned và Completed có số phút cũ từ V1)
-              // TUYỆT ĐỐI KHÔNG XÓA HOẶC RESET VỀ 0 LÀM MẤT DỮ LIỆU LỊCH SỬ
-              a.actualDurationSource = 'legacy_unverified';
-              a.actualDurationMinutes = legacyMinutes;
-              a.actualDurationSeconds = legacyMinutes * 60;
-            } else {
-              // Ưu tiên 4: unperformed (chưa thực hiện, thời gian = 0)
-              a.actualDurationSource = 'unperformed';
-              a.actualDurationMinutes = 0;
-              a.actualDurationSeconds = 0;
+            };
+          };
+
+          const timerRequest = timerStore.getAll();
+          timerRequest.onsuccess = () => {
+            const allSessions = timerRequest.result || [];
+            const timerMap = new Map();
+
+            for (const s of allSessions) {
+              if (s && s.status === 'completed' && s.activityId) {
+                const entry = timerMap.get(s.activityId) || {
+                  timerSeconds: 0,
+                  manualSeconds: 0,
+                  hasTimer: false,
+                  hasManual: false
+                };
+                const secs = Number(s.totalSeconds) || 0;
+                const sType = s.type; // Whitelist check: 'timer' || 'pomodoro'
+                if (sType === 'timer' || sType === 'pomodoro') {
+                  if (secs > 0) {
+                    entry.timerSeconds += secs;
+                    entry.hasTimer = true;
+                  }
+                } else if (sType === 'manual') {
+                  if (secs > 0) {
+                    entry.manualSeconds += secs;
+                    entry.hasManual = true;
+                  }
+                }
+                timerMap.set(s.activityId, entry);
+              }
             }
 
-            cursor.update(a);
-            cursor.continue();
-          }
-        };
+            migrateActivitiesWithTimerMap(timerMap);
+          };
+
+          timerRequest.onerror = () => {
+            migrateActivitiesWithTimerMap(null);
+          };
+        }
       }
     };
 
