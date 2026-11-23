@@ -33,6 +33,8 @@ export class App {
   }
 
   async init() {
+    this.root = document.getElementById('app') || document.body;
+
     // 1. Initialize IndexedDB
     try {
       await databaseService.initDatabase();
