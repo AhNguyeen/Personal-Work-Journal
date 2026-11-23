@@ -2,7 +2,7 @@
 > **Tài liệu kiểm toán toàn diện mã nguồn, nhánh Git, cơ sở dữ liệu và bảo mật**  
 > **Dự án:** Personal Work Journal  
 > **Phiên bản hiện tại:** 1.0.0 | **Mục tiêu nâng cấp:** 2.0.0  
-> **Thời điểm kiểm toán:** 23/11/2026
+> **Thời điểm kiểm toán:** 23/11/2026 (Cập nhật hoàn thiện sau rà soát)
 
 ---
 
@@ -48,7 +48,7 @@
 - **Vấn đề phát hiện (P0/P1):**
   - **Lỗi bẫy Promise trong `initDatabase()`:** Thuộc tính `this._initPromise` lưu giữ Promise kết nối. Nếu kết nối bị lỗi hoặc bị abort một lần, `this._initPromise` bị giữ ở trạng thái rejected vĩnh viễn, ngăn cản các lần thử kết nối lại của người dùng.
   - **Thiếu lắng nghe sự kiện `onblocked` và `onclose`:** Khi mở nhiều tab hoặc trong quá trình nâng cấp version, thiếu handler `onblocked` có thể khiến kết nối bị treo.
-  - **Transaction an toàn trong `importData()`:** Trong chế độ `replace`, các store bị `clearStore()` trước khi xác thực sâu từng bản ghi của file import. Nếu một store ở giữa bị lỗi dữ liệu, dữ liệu cũ đã bị xóa một phần.
+  - **Cơ chế Transaction trong `importData()` (Replace Mode):** Trong chế độ `replace`, các store hiện bị `clearStore()` theo các transaction rời rạc trước khi import. Nếu xảy ra lỗi giữa chừng, dữ liệu cũ đã bị xóa dở dang mà không thể khôi phục tự động. Bắt buộc phải đưa toàn bộ thao tác `clear` và `import` của 9 stores vào **CÙNG MỘT TRANSACTION READWRITE DUY NHẤT** để đảm bảo rollback tuyệt đối.
 
 ### 2. Tầng nghiệp vụ (Service Layer) & Tính toán thời gian
 - **`activityService.js`:**
@@ -56,11 +56,11 @@
     ```javascript
     actualDurationMinutes: Number(rawData.actualDurationMinutes) || durationMinutes
     ```
-    Điều này khiến một hoạt động mới lên lịch (`Planned`) nhưng thống kê đã coi như đã hoàn thành số phút đó, làm sai lệch báo cáo hiệu suất (Planned vs Actual).
-  - **Giải pháp:** Tách biệt rõ ràng:
-    - `durationMinutes`: Thời lượng dự kiến lên lịch.
-    - `actualDurationSeconds`: Số giây thực tế tích lũy từ Timer hoặc nhập thủ công (mặc định = 0 khi mới tạo).
-    - `actualDurationMinutes`: Thuộc tính phái sinh tương thích ngược.
+    Điều này làm sai lệch thống kê hiệu suất. Không được mặc định rằng một hoạt động có trạng thái `Completed` thì `actualDurationMinutes` là số liệu thực tế đáng tin cậy.
+  - **Giải pháp chuẩn hóa & Bảo toàn dữ liệu cũ:**
+    - Phân loại 4 nguồn dữ liệu: `timer_verified` (có Timer Session), `manual_verified` (nhập tay), `legacy_unverified` (dữ liệu V1 cũ sao chép từ dự kiến), `unperformed` (chưa thực hiện).
+    - Ưu tiên tính thời gian từ `timerSessions`. Không cộng dồn hai lần giữa Timer và thủ công.
+    - Giữ nguyên `actualDurationMinutes` để tương thích ngược, đồng thời bổ sung `actualDurationSeconds` và `actualDurationSource`.
 - **`timerService.js`:**
   - Hoạt động ổn định, lưu trữ `startTimestamp` và `accumulatedSeconds` vào `settings` để chống trôi thời gian khi F5/reload.
   - Cần nâng cấp để hỗ trợ chế độ Pomodoro (Focus / Short Break / Long Break) và tích hợp liên kết Dự án (`projectId`).
@@ -79,7 +79,7 @@
 
 ### 4. Giao diện (UI/UX & Routing)
 - **Triết lý sản phẩm:** Duy trì tuyệt đối **Daily Schedule Timeline (24h)** và **Daily Journal**. Hoàn toàn không có Kanban Board, không có cột trạng thái kéo thả.
-- **Khả năng mở rộng:** Sidebar hiện có 10 mục. Việc bổ sung `Projects` và `Focus Mode` cần được tích hợp hài hòa, không tạo menu lồng nhau phức tạp.
+- **Khả năng mở rộng:** Sidebar hiện có 10 mục. Bổ sung `Projects` và `Focus Mode` hài hòa, không tạo menu lồng nhau phức tạp.
 - **Chủ đề hiển thị:** Hiện mới chỉ có Light Theme; cần bổ sung Dark Theme và System Theme theo chuẩn CSS Custom Properties hiện có.
 
 ### 5. Khả năng hỗ trợ PWA & Offline
@@ -95,32 +95,34 @@
 | :--- | :--- | :--- | :---: | :--- |
 | **SEC-01** | Global Search | XSS qua nội dung tìm kiếm chưa escape HTML | **P0 - Critical** | Áp dụng `escapeHTML` cho tất cả thuộc tính hiển thị |
 | **DATA-01** | IndexedDB | `_initPromise` bị kẹt khi lỗi, thiếu `onblocked`/`onclose` | **P0 - Critical** | Reset promise trong `.catch()`, thêm handler `onblocked` |
-| **DATA-02** | Activity Service | `actualDurationMinutes` tự gán bằng `durationMinutes` | **P0 - Critical** | Chuẩn hóa `actualDurationSeconds` = 0 cho task mới |
-| **DATA-03** | Backup/Restore | Import thiếu validation schema từng store & rollback | **P1 - High** | Validate cấu trúc sâu trước khi ghi, tạo backup tạm |
-| **FEAT-01** | Recurrence | Chưa có lịch lặp lại (hằng ngày, theo thứ, tháng) | **P1 - High** | Thêm Object Store `recurrenceRules`, sinh lịch theo khoảng |
-| **FEAT-02** | Project Journal | Chưa có hồ sơ quản lý dự án và nhật ký dự án | **P1 - High** | Thêm Object Store `projects`, liên kết `projectId` |
+| **DATA-02** | Activity Service | `actualDurationMinutes` tự gán bằng `durationMinutes` | **P0 - Critical** | Chuẩn hóa `actualDurationSeconds` và phân loại 4 nguồn dữ liệu |
+| **DATA-03** | Backup/Restore | Import thiếu validation schema từng store & atomic transaction | **P1 - High** | Validate cấu trúc sâu trước khi ghi, chạy trong 1 transaction duy nhất |
+| **FEAT-01** | Recurrence | Chưa có lịch lặp lại (hằng ngày, theo thứ, tháng) | **P1 - High** | Thêm Object Store `recurrenceRules`, mô hình `ScheduleOccurrence` định danh |
+| **FEAT-02** | Project Journal | Chưa có hồ sơ dự án và nhật ký dự án riêng biệt | **P1 - High** | Thêm Object Store `projects` và `projectJournalEntries` |
 | **FEAT-03** | Advanced Time | Chưa có Focus Mode riêng và Pomodoro Timer | **P1 - High** | Nâng cấp `timerService` hỗ trợ Pomodoro & Focus Screen |
-| **PWA-01** | PWA & Offline | Chưa có Manifest, Service Worker và App Shell cache | **P2 - Medium** | Tạo `manifest.webmanifest`, `sw.js`, tích hợp đăng ký |
+| **PWA-01** | PWA & Offline | Chưa có Manifest, Service Worker và App Shell cache | **P2 - Medium** | Tạo `manifest.webmanifest`, `sw.js`, tích hợp đăng ký an toàn |
 | **UI-01** | Personalization | Chưa có Dark Theme và tùy biến màu sắc/thời gian | **P2 - Medium** | Bổ sung theme switcher và lưu cấu hình vào `settings` |
 
 ---
 
-## IV. MA TRẬN TÁC ĐỘNG TỆP (IMPACT ANALYSIS)
+## IV. MA TRẬN TÁC ĐỘNG TỆP (IMPACT ANALYSIS CHO V2)
 
 | Tệp tin | Trạng thái | Nội dung tác động |
 | :--- | :---: | :--- |
-| `src/database/db.js` | Chỉnh sửa | Nâng `DB_VERSION = 2`, tạo store `projects`, `recurrenceRules`, thêm indexes |
-| `src/database/databaseService.js` | Chỉnh sửa | Sửa `_initPromise`, thêm `onblocked`, tăng cường giao dịch an toàn |
+| `src/database/db.js` | Chỉnh sửa | Nâng `DB_VERSION = 2`, tạo store `projects`, `recurrenceRules`, `projectJournalEntries`, thêm indexes |
+| `src/database/databaseService.js` | Chỉnh sửa | Sửa `_initPromise`, thêm `onblocked`, hỗ trợ single-transaction replace |
 | `src/database/repositories/projectRepository.js` | **Tạo mới** | Repository quản lý Project CRUD |
+| `src/database/repositories/projectJournalRepository.js` | **Tạo mới** | Repository quản lý Project Journal Entries CRUD |
 | `src/database/repositories/recurrenceRepository.js` | **Tạo mới** | Repository quản lý Recurrence Rules |
 | `src/services/activityService.js` | Chỉnh sửa | Chuẩn hóa `actualDurationSeconds`, liên kết `projectId` & `recurrenceRuleId` |
 | `src/services/timerService.js` | Chỉnh sửa | Tích hợp chu trình Pomodoro (Focus/Break) & gắn `projectId` |
 | `src/services/projectService.js` | **Tạo mới** | Nghiệp vụ dự án, tính tổng thời gian, tiến độ và nhật ký dự án |
-| `src/services/recurrenceService.js` | **Tạo mới** | Tính toán các lần xuất hiện của lịch lặp |
-| `src/services/backupService.js` | Chỉnh sửa | Thêm stores mới vào backup, thẩm định schema sâu |
-| `src/pages/Projects/ProjectsPage.js` | **Tạo mới** | Màn hình quản lý dự án và Project Timeline / Journal |
+| `src/services/recurrenceService.js` | **Tạo mới** | Tính toán các lần xuất hiện của lịch lặp theo mô hình Occurrence |
+| `src/services/backupService.js` | Chỉnh sửa | Hỗ trợ 9 stores vào backup, thẩm định schema sâu và snapshot rollback |
+| `src/pages/Projects/ProjectsPage.js` | **Tạo mới** | Màn hình quản lý dự án, Project Timeline và Project Journal Entries |
 | `src/pages/Focus/FocusPage.js` | **Tạo mới** | Màn hình Focus Mode & Pomodoro tối giản |
 | `src/app.js` | Chỉnh sửa | Vá XSS Search, đăng ký routes `projects`, `focusMode` |
 | `src/components/Sidebar.js` | Chỉnh sửa | Thêm mục `Projects` và `Focus Mode` |
 | `public/manifest.webmanifest` | **Tạo mới** | Web App Manifest cấu hình chuẩn GitHub Pages |
 | `public/sw.js` | **Tạo mới** | Service Worker quản lý offline cache an toàn |
+| `test/test-suite.js` | Chỉnh sửa | Mở rộng bổ sung 12 kịch bản test migration và nghiệp vụ V2 |
